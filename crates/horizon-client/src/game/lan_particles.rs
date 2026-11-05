@@ -984,48 +984,36 @@ mod tests {
             g
         };
         let (tx_near, rx_near) = std::sync::mpsc::channel();
-        let mut near = Guest::new(
-            Joined {
-                conn: 1,
-                uuid: 1,
-                name: "NearPlayer".into(),
-                properties: Vec::new(),
-                info: horizon_protocol::packets::configuration::ClientInformation::new(8),
-                brand: "vanilla".into(),
-                sender: PlayerSender::new(tx_near, std::sync::Arc::default()),
-                latency: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0)),
-                address: "127.0.0.1:25565".parse().unwrap(),
-                expected: false,
-            },
-            1,
-            [5.0, 64.0, 5.0],
-            8,
-        );
-        near.placed = true;
-        near.dimension = "minecraft:overworld".into();
-        hub.guests.push(near);
-
+        hub.guests
+            .push(guest(1, 1, "NearPlayer", [5.0, 64.0, 5.0], tx_near));
         let (tx_far, rx_far) = std::sync::mpsc::channel();
-        let mut far = Guest::new(
-            Joined {
-                conn: 2,
-                uuid: 2,
-                name: "FarPlayer".into(),
-                properties: Vec::new(),
-                info: horizon_protocol::packets::configuration::ClientInformation::new(8),
-                brand: "vanilla".into(),
-                sender: PlayerSender::new(tx_far, std::sync::Arc::default()),
-                latency: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0)),
-                address: "127.0.0.1:25566".parse().unwrap(),
-                expected: false,
-            },
-            2,
-            [100.0, 64.0, 100.0],
-            8,
-        );
-        far.placed = true;
-        far.dimension = "minecraft:overworld".into();
-        hub.guests.push(far);
+        hub.guests
+            .push(guest(2, 2, "FarPlayer", [100.0, 64.0, 100.0], tx_far));
+        (hub, rx_near, rx_far)
+    }
+
+    /// The one `ClientboundLevelParticlesPacket` a guest receives.
+    fn level_particles(rx: &std::sync::mpsc::Receiver<Out>) -> play::LevelParticles {
+        let out = rx
+            .try_recv()
+            .expect("guest should receive a LevelParticles packet");
+        let body = match out {
+            Out::Packet(body) => body,
+            _ => panic!("expected Out::Packet"),
+        };
+        let mut r = horizon_protocol::buf::Reader::new(&body);
+        let id = r.varint().unwrap();
+        match play::Clientbound::decode(id, r.rest()).unwrap() {
+            play::Clientbound::LevelParticles(p) => p,
+            other => panic!("expected LevelParticles packet, got {other:?}"),
+        }
+    }
+
+    /// `ShulkerBullet.hurtServer`: fifteen crit particles (spread 0.2, speed 0.0)
+    /// are sent to tracking players within 32 blocks.
+    #[test]
+    fn hitting_shulker_bullet_sends_15_crit_particles_to_players() {
+        let (hub, rx_near, rx_far) = test_hub("ShulkerBulletTest", vec!["minecraft:crit".into()]);
 
         let at = [0.0, 64.0, 0.0];
         let options = ParticleOptions::simple(ParticleType::from_name("crit").unwrap());
