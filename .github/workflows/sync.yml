@@ -224,11 +224,20 @@ jobs:
           KEYS
           git add -A
           git reset --soft main
-          git commit -m "Sync: official launcher@$VERSION with the offline patch re-applied"
-          git push origin HEAD:main
-          # -f: a matching tag from `git fetch --tags` above must not block it.
+          if git diff --cached --quiet; then
+            # This official version is already on main, with the patch: a retry
+            # (a build failed before), or its tag was removed since. There is
+            # nothing to commit — main's tree is what the tag points at, and
+            # what the release below builds.
+            echo "nothing to sync: launcher@$VERSION is already on main"
+          else
+            git commit -m "Sync: official launcher@$VERSION with the offline patch re-applied"
+            git push origin HEAD:main
+          fi
+          # -f: a matching tag from `git fetch --tags` above must not block it,
+          # and a stale one from a retry must be replaced.
           git tag -f "$tag" HEAD
-          git push origin "refs/tags/$tag"
+          git push -f origin "refs/tags/$tag"
 
   publish:
     needs: [watch, sync-source]
