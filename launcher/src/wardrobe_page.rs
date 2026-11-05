@@ -1,6 +1,7 @@
 //! The Wardrobe page (top bar, between Servers and Versions), in the glass look, shown when the
 //! cosmetics service has a founder set to show (`horizon_launcher::shop`, `watch_shop`), or with
-//! `HORIZON_COSMETICS=1`: the signed-in Microsoft account's skin wearing its items, a
+//! `HORIZON_COSMETICS=1`: the signed-in Microsoft account's skin wearing its items, or an
+//! offline name's trying the whole catalogue on (no account to prove, so nothing syncs), a
 //! row per slot, what the account owns for the chosen slot, the purchase history, a button to the
 //! website's shop (buying and the founder claim happen there, except "Claim for free" where
 //! Paddle doesn't sell: `Claim::here`, decided by the service), and three switches:
@@ -17,7 +18,7 @@ use gpui::RenderImage;
 use horizon_cosmetics::prefs::{self, Others, Prefs};
 use horizon_cosmetics::{preview, Item, Texture};
 use horizon_launcher::wardrobe::{
-    Catalogue, Change, ClaimState, Error, Saved, Service, Session, SHOP_URL,
+    Catalogue, Change, ClaimState, Error, Me, Saved, Service, Session, SHOP_URL,
 };
 use horizon_theme::glass::{fill, ink, radius};
 use std::collections::HashMap;
@@ -32,6 +33,10 @@ const W: f32 = 180.;
 const H: f32 = 264.;
 /// How long a line like "Equipped Founder Visor." stays.
 const TOAST: Duration = Duration::from_secs(4);
+
+/// Before an offline name's pseudo uuid (`offline_account`): nothing that starts with it signed
+/// in with Microsoft, and the page never sends what starts with it to the cosmetics service.
+const OFFLINE_PREFIX: &str = "offline-";
 
 /// The slots a row each, with their names. Name tags have no model; launcher themes are free in
 /// Settings, not worn.
@@ -57,7 +62,8 @@ enum Status {
 }
 
 pub(super) struct Wardrobe {
-    /// The Microsoft account it is for.
+    /// The account it is for: a Microsoft one by uuid, or an offline name's pseudo uuid
+    /// ([`OFFLINE_PREFIX`], never on the service).
     uuid: String,
     saved: Saved,
     items: HashMap<String, Arc<Item>>,
@@ -110,6 +116,41 @@ fn skin(account: &account::Account) -> Option<(Texture, bool)> {
                 rgba: image.into_raw(),
             },
             model == "slim",
+        )
+    })
+}
+
+/// A stand-in account for an offline name: no Mojang profile to prove, no session to sign in.
+/// Its `uuid` starts with [`OFFLINE_PREFIX`], which the page keeps away from the service; its
+/// outfit is kept on disk like an account's, so it survives the launcher.
+fn offline_account(name: &str) -> account::Account {
+    account::Account {
+        uuid: format!("{OFFLINE_PREFIX}{name}"),
+        name: name.to_owned(),
+        skin: None,
+        cape: None,
+    }
+}
+
+/// An offline name's skin as the preview takes it: from the skins folder, 64×64 only (older
+/// 64×32 skins and names without one show a plain figure).
+fn offline_skin(name: &str, look: &horizon_launcher::skins::Look) -> Option<(Texture, bool)> {
+    if !look.skin {
+        return None;
+    }
+    let (path, _) = horizon_launcher::skins::files(&horizon_launcher::skins::dir(), name);
+    let image = std::fs::read(path)
+        .ok()
+        .and_then(|png| image::load_from_memory(&png).ok())?
+        .to_rgba8();
+    (image.dimensions() == (64, 64)).then(|| {
+        (
+            Texture {
+                width: 64,
+                height: 64,
+                rgba: image.into_raw(),
+            },
+            look.model == horizon_launcher::skins::Model::Slim,
         )
     })
 }
@@ -171,6 +212,50 @@ fn refresh(service: &Service, account: &account::Account, trip: &mut Trip) -> Re
         me.apply(change);
     }
     trip.saved.me = Some(me);
+    Ok(())
+}
+
+/// An offline name's trip: only what the service answers to anyone (`GET /v1/catalogue`, the
+/// item files) is asked — no session to prove, so nothing is sent and no syncing happens. The
+/// outfit is kept here instead: the kept one when there is one, else a fresh one that owns the
+/// whole catalogue to try on, with what still waits applied to it.
+fn browse(service: &Service, account: &account::Account, trip: &mut Trip) -> Result<(), Error> {
+    let catalogue = match service.catalogue() {
+        Ok(c) => c,
+        Err(e) => {
+            if let Some(c) = &trip.saved.catalogue {
+                trip.items = fetch_items(service, c);
+            }
+            return Err(e);
+        }
+    };
+    trip.items = fetch_items(service, &catalogue);
+    let mut saved = std::mem::take(&mut trip.saved);
+    if saved.me.is_none() {
+        let claim = catalogue.claim.clone();
+        let owned = catalogue
+            .items
+            .iter()
+            // Theme items are the launcher's colours, not worn on the player.
+            .filter(|e| e.slot != "theme")
+            .map(|e| e.id.clone())
+            .collect();
+        let mut me = Me {
+            uuid: account.uuid.clone(),
+            name: account.name.clone(),
+            owned,
+            equipped: std::collections::BTreeMap::new(),
+            visible: true,
+            claim,
+            purchases: Vec::new(),
+        };
+        for change in &saved.pending {
+            me.apply(change);
+        }
+        saved.me = Some(me);
+    }
+    saved.catalogue = Some(catalogue);
+    trip.saved = saved;
     Ok(())
 }
 
@@ -237,8 +322,9 @@ fn day(secs: i64) -> String {
 }
 
 impl Launcher {
-    /// On every visit to the page: the selected Microsoft account's kept outfit at once, then the
-    /// service's answer, sending what waits.
+    /// On every visit to the page: what the page is for, kept on disk, shows at once — the
+    /// selected account's outfit, or an offline name's try-on — then the service's answer,
+    /// sending what waits. An offline name's trip signs in nowhere (`browse`).
     pub(super) fn open_wardrobe(&mut self, cx: &mut Context<Self>) {
         let Some(account) = self.wardrobe_account() else {
             self.wardrobe = None;
@@ -254,12 +340,23 @@ impl Launcher {
         let keep = self.wardrobe.take().filter(|w| w.uuid == account.uuid);
         let saved = Saved::load(&dir(), &account.uuid);
         let (slot, turn) = keep.as_ref().map_or(("head", 0), |w| (w.slot, w.turn));
+        // An offline name tries the catalogue on without a session to prove; its picture comes
+        // from the skins folder when the name has one.
+        let offline = account.uuid.starts_with(OFFLINE_PREFIX);
+        let skin = if offline {
+            self.accounts
+                .looks
+                .get(&account.name.to_ascii_lowercase())
+                .and_then(|look| offline_skin(&account.name, look))
+        } else {
+            skin(&account)
+        };
         self.wardrobe = Some(Wardrobe {
             uuid: account.uuid.clone(),
             saved: saved.clone(),
             items: keep.map(|w| w.items).unwrap_or_default(),
             session: None,
-            skin: skin(&account),
+            skin,
             status: Status::Loading,
             busy: true,
             slot,
@@ -275,7 +372,11 @@ impl Launcher {
                 session: None,
                 result: Ok(()),
             };
-            trip.result = refresh(&service, &account, &mut trip);
+            trip.result = if offline {
+                browse(&service, &account, &mut trip)
+            } else {
+                refresh(&service, &account, &mut trip)
+            };
             if let Err(e) = trip.saved.save(&dir(), &account.uuid) {
                 eprintln!("Horizon: the outfit is not saved: {e}");
             }
@@ -346,11 +447,13 @@ impl Launcher {
         .detach();
     }
 
-    /// The account the page is for: the selected one, if it signed in with Microsoft.
+    /// The account the page is for: the selected one if it signed in with Microsoft, or the
+    /// offline name playing (a pseudo account: [`offline_account`], never on the service).
     fn wardrobe_account(&self) -> Option<account::Account> {
         match self.accounts.player() {
             account::Player::Microsoft(_) => self.accounts.selected().cloned(),
-            _ => None,
+            account::Player::Offline(name) => Some(offline_account(&name)),
+            account::Player::GameName => None,
         }
     }
 
@@ -367,7 +470,7 @@ impl Launcher {
             w.session = trip.session;
         }
         w.saved = trip.saved;
-        if trip.result.is_ok() {
+        if trip.result.is_ok() && !w.uuid.starts_with(OFFLINE_PREFIX) {
             tell_the_game(&w.uuid, &w.saved);
         }
         w.status = match trip.result {
@@ -397,12 +500,13 @@ impl Launcher {
     }
 
     /// Wear `item` in `slot` (None: nothing there), or turn Show my cosmetics on or off: at once
-    /// here and on disk, then on the service.
+    /// here and on disk, then on the service. An offline name's change only reaches the disk.
     fn wardrobe_change(&mut self, change: Change, cx: &mut Context<Self>) {
         let lang = game_language();
         let Some(w) = self.wardrobe.as_mut() else {
             return;
         };
+        let offline = w.uuid.starts_with(OFFLINE_PREFIX);
         let done: String = match &change {
             Change::Equip { item: Some(id), .. } => {
                 let name = (w.saved.catalogue.iter())
@@ -441,9 +545,15 @@ impl Launcher {
             return;
         };
         let Some(session) = w.session.clone().filter(|s| s.live()) else {
-            // Offline, or the session ended: it waits, and the next visit sends it.
+            // Offline, or the session ended: it waits, and the next visit sends it. An offline
+            // name never sends: what it wears is only ever on this computer.
             w.toast = Some((
-                tr("Saved on this computer. It syncs when you're back online.").into(),
+                tr(if offline {
+                    "Saved on this computer."
+                } else {
+                    "Saved on this computer. It syncs when you're back online."
+                })
+                .into(),
                 Instant::now(),
             ));
             return;
@@ -1036,7 +1146,8 @@ impl Launcher {
         }))
     }
 
-    /// Over the page: offline, a failure, or an account that owns nothing yet.
+    /// Over the page: the service out of reach, a failure, an account that owns nothing yet, or
+    /// the note an offline name gets instead of the shop's rows.
     fn wardrobe_banner(&self, w: &Wardrobe, cx: &mut Context<Self>) -> Option<Div> {
         let t = self.theme;
         let row = |said: String| {
@@ -1056,12 +1167,22 @@ impl Launcher {
         match &w.status {
             Status::Offline => {
                 let waiting = w.saved.pending.len();
-                let mut said = tr(
-                    "You're offline. You can still change what you wear: it saves on this \
-                     computer and syncs when you're back online.",
-                )
-                .to_string();
-                if waiting > 0 {
+                let offline = w.uuid.starts_with(OFFLINE_PREFIX);
+                let mut said = if offline {
+                    // An offline name doesn't sync: what it wears is only on this computer.
+                    tr(
+                        "You're offline, so the catalogue can't load. What you wear here is \
+                         saved on this computer.",
+                    )
+                    .to_string()
+                } else {
+                    tr(
+                        "You're offline. You can still change what you wear: it saves on this \
+                         computer and syncs when you're back online.",
+                    )
+                    .to_string()
+                };
+                if waiting > 0 && !offline {
                     said = format!(
                         "{said} {}",
                         trf(
@@ -1094,6 +1215,29 @@ impl Launcher {
             Status::Loading | Status::Ready => {}
         }
         let me = w.saved.me.as_ref()?;
+        // An offline name plays it honest: everything here is to try on, and nothing reaches
+        // the service; cosmetics other players see come from a Microsoft account.
+        if w.uuid.starts_with(OFFLINE_PREFIX) {
+            let sign_in = button(
+                "wardrobe-offline-sign-in",
+                "Sign in with Microsoft",
+                Kind::Secondary,
+                &t,
+            )
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.go(Page::Settings);
+                this.start_sign_in();
+                cx.notify();
+            }));
+            return Some(
+                row(tr(
+                    "You're playing without a Microsoft account. Everything here is to try on, \
+                     and it saves on this computer; sign in to wear cosmetics other players see.",
+                )
+                .into())
+                .child(sign_in),
+            );
+        }
         // Paddle doesn't sell where the player is: the founder set is claimed here.
         if me.claim.here() {
             let claim = button("wardrobe-claim", "Claim for free", Kind::Primary, &t);
