@@ -5,9 +5,11 @@ name: sync
 #
 #   1. the watch job emits the official version,
 #   2. sync-source checks out that tag's sources, cherry-picks everything after
-#      PATCH_SHA on main (the offline patch and every offline change) onto them
-#      with our hunks winning (`-X theirs`), restores our CI files and our
-#      release-keys.txt line, commits the result to main and pushes its tag,
+#      PATCH_SHA on main (the offline patch and every offline change, and never
+#      a past sync commit) onto them with our hunks winning (`-X theirs`), then
+#      converges every path no offline commit owns to the official tag's exact
+#      content, restores our CI files and our release-keys.txt line, commits
+#      the result to main and pushes its tag,
 #   3. publish calls build.yml to build, sign and release that tag here.
 #
 # The launcher's self-update feed reads this repository (LAUNCHER_UPDATES_REPO
@@ -135,7 +137,14 @@ jobs:
           # ranged pick. So the range goes commit by commit, and every file-level
           # fight is settled the way the flavor decided it: what the flavor is rid
           # of, this tree stays rid of; what the flavor keeps, ours win.
-          for r in $(git rev-list --reverse "$PATCH_SHA^..main"); do
+          # Past "Sync: official launcher@" commits are not flavor: their diff
+          # IS the previous official change-set, and re-applying it here dragged
+          # that vintage over the new one wherever the picks conflicted. Pick
+          # only real offline commits; the plain-official convergence below
+          # settles everything else the official tag carries.
+          for r in $(git rev-list --reverse \
+                --grep '^Sync: official launcher@' --invert-grep \
+                "$PATCH_SHA^..main"); do
             git cherry-pick --quit 2>/dev/null || true
             git cherry-pick -n -X theirs "$r" || {
               code=$?
@@ -150,6 +159,55 @@ jobs:
             }
           done
           git cherry-pick --quit 2>/dev/null || true
+          # Plain-official convergence: the pick alone can settle a whole-file
+          # conflict between a past sync commit and the official tag with the
+          # old vintage (how 0.2.42's modpacks came to rest on 0.2.43). So every
+          # path that never was a real offline commit's business carries the
+          # official tag's exact content again: differing and missing files are
+          # written from the official tree (fetched above; its blobs are all
+          # local), files official dropped are removed, and owned paths keep
+          # whatever the picks settled.
+          promain=$(git rev-parse main)
+          owned() {  # is this path a real (never a sync) offline commit's business?
+            git log -1 --format=%h --grep '^Sync: official launcher@' --invert-grep \
+              "$PATCH_SHA^..$promain" -- "$1" 2>/dev/null | grep -q .
+          }
+          tmp=$(mktemp -d)
+          git ls-tree -r --format='%(path) %(objectname)' "refs/tags/official-$VERSION" > "$tmp/official.txt"
+          awk '{print $1}' "$tmp/official.txt" > "$tmp/official.paths"
+          declare -A OFFICIAL=()
+          while read -r p sha; do OFFICIAL[$p]=$sha; done < "$tmp/official.txt"
+          git ls-tree -r --format='%(path) %(objectname)' HEAD > "$tmp/ours.txt"
+          declare -A OURS=()
+          while read -r p sha; do OURS[$p]=$sha; done < "$tmp/ours.txt"
+          for p in "${!OFFICIAL[@]}"; do
+            case "$p" in .github/*|crates/horizon-release-sign/release-keys.txt) continue;; esac
+            case "$p" in launcher/src/sources.rs|launcher/src/sources_tests.rs) continue;; esac
+            o=${OURS[$p]:-MISSING}
+            [ "$o" = "${OFFICIAL[$p]}" ] && continue
+            owned "$p" && continue
+            if [ "$o" = MISSING ]; then
+              dir="${p%/*}"
+              [ "$dir" != "$p" ] && mkdir -p "$dir"
+              git cat-file blob "${OFFICIAL[$p]}" > "$p"
+              git add -A -- "$p"
+              echo "restored from official: $p (was missing)"
+            else
+              git checkout "refs/tags/official-$VERSION" -- "$p"
+              echo "restored from official: $p"
+            fi
+          done
+          for p in "${!OURS[@]}"; do
+            case "$p" in .github/*|crates/horizon-release-sign/release-keys.txt) continue;; esac
+            case "$p" in launcher/src/sources.rs|launcher/src/sources_tests.rs) continue;; esac
+            grep -Fxq "$p" "$tmp/official.paths" && continue
+            owned "$p" && continue
+            [ -f "$p" ] || continue
+            git rm -f --quiet -- "$p" 2>/dev/null || rm -f -- "$p"
+            echo "removed (official has no such file): $p"
+          done
+          unset OFFICIAL OURS
+          rm -rf "$tmp"
           # Our CI files, not the official tag's: sync builds only ever run ours.
           rm -rf .github
           git checkout main -- .github
