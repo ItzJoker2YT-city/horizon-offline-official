@@ -130,15 +130,26 @@ jobs:
           # upstream's disagree, ours win (the patch: things it deletes or changes
           # stay deleted or changed).
           # Where official merely changed a file the flavor deletes (its `.github`
-          # workflows and design, touched again by launcher@0.2.43), a plain pick
-          # halts on the modify/delete fight it cannot settle. The watcher's rule
-          # here is: what the flavor is rid of, this tree gets rid of first — then
-          # the patch's deletion of the same files merges as "both sides deleted"
-          # and ours win (this repo's CI replaces theirs outright).
-          git diff --diff-filter=D --name-only "$PATCH_SHA^" main | while read -r p; do
-            rm -f "$p"
+          # workflows and design, touched again by launcher@0.2.43), `-X theirs`
+          # has no say: a modify/delete fight isn't a content one, and it halts a
+          # ranged pick. So the range goes commit by commit, and every file-level
+          # fight is settled the way the flavor decided it: what the flavor is rid
+          # of, this tree stays rid of; what the flavor keeps, ours win.
+          for r in $(git rev-list --reverse "$PATCH_SHA^..main"); do
+            git cherry-pick --quit 2>/dev/null || true
+            git cherry-pick -n -X theirs "$r" || {
+              code=$?
+              [ "$code" -eq 1 ] || exit "$code"
+              for p in $(git diff --name-only --diff-filter=U); do
+                if git cat-file -e "$r:$p" 2>/dev/null; then
+                  git checkout "$r" -- "$p"
+                else
+                  git rm -f --quiet -- "$p"
+                fi
+              done
+            }
           done
-          git cherry-pick -n -X theirs "$PATCH_SHA^..main"
+          git cherry-pick --quit 2>/dev/null || true
           # Our CI files, not the official tag's: sync builds only ever run ours.
           rm -rf .github
           git checkout main -- .github
