@@ -6,7 +6,8 @@ name: sync
 #   1. the watch job emits the official version,
 #   2. sync-source checks out that tag's sources, cherry-picks everything after
 #      PATCH_SHA on main (the offline patch and every offline change, and never
-#      a past sync commit) onto them with our hunks winning (`-X theirs`), then
+#      a past sync commit nor a plain-official restore) onto them with our
+#      hunks winning (`-X theirs`), then
 #      converges every path no offline commit owns to the official tag's exact
 #      content, restores our CI files and our release-keys.txt line, commits
 #      the result to main and pushes its tag,
@@ -139,11 +140,14 @@ jobs:
           # of, this tree stays rid of; what the flavor keeps, ours win.
           # Past "Sync: official launcher@" commits are not flavor: their diff
           # IS the previous official change-set, and re-applying it here dragged
-          # that vintage over the new one wherever the picks conflicted. Pick
-          # only real offline commits; the plain-official convergence below
-          # settles everything else the official tag carries.
+          # that vintage over the new one wherever the picks conflicted. The
+          # same goes for "Restore the plain-official" commits: they only carry
+          # plain-official content of some past tag back in, which the
+          # plain-official convergence below settles anyway, right against the
+          # tag being synced. Pick only real offline commits.
           for r in $(git rev-list --reverse \
-                --grep '^Sync: official launcher@' --invert-grep \
+                --grep '^Sync: official launcher@' \
+                --grep '^Restore the plain-official' --invert-grep \
                 "$PATCH_SHA^..main"); do
             git cherry-pick --quit 2>/dev/null || true
             git cherry-pick -n -X theirs "$r" || {
