@@ -117,12 +117,19 @@ jobs:
           fi
           git config user.name "offline-sync[bot]"
           git config user.email "offline-sync[bot]@users.noreply.github.com"
-          git fetch --depth 1 "https://github.com/$OFFICIAL_REPO" "refs/tags/$tag:refs/tags/official-$VERSION"
+          # --no-tags: the tag must not also land under its own name here (it is
+          # created below, from the sync commit, not from the official one).
+          git fetch --depth 1 --no-tags "https://github.com/$OFFICIAL_REPO" "refs/tags/$tag:refs/tags/official-$VERSION"
           git checkout --detach "refs/tags/official-$VERSION"
-          # The whole offline flavor rides along: everything after PATCH_SHA on
-          # main. `-X theirs` = where our hunks and upstream's disagree, ours win
-          # (the patch: things it deletes or changes stay deleted or changed).
-          git cherry-pick -n -X theirs "$PATCH_SHA..main"
+          # The whole offline flavor rides along: the patch commit and everything
+          # after it on main. The range starts at PATCH_SHA's parent, because the
+          # 3-way base of the patch commit is that parent — the pre-patch official
+          # tree — which is exactly what "re-apply the patch" means (cherry-picking
+          # only after PATCH_SHA would use the patched tree as the base and then
+          # drop every file the patch adds). `-X theirs` = where our hunks and
+          # upstream's disagree, ours win (the patch: things it deletes or changes
+          # stay deleted or changed).
+          git cherry-pick -n -X theirs "$PATCH_SHA^..main"
           # Our CI files, not the official tag's: sync builds only ever run ours.
           rm -rf .github
           git checkout main -- .github
@@ -137,7 +144,8 @@ jobs:
           git reset --soft main
           git commit -m "Sync: official launcher@$VERSION with the offline patch re-applied"
           git push origin HEAD:main
-          git tag "$tag"
+          # -f: a matching tag from `git fetch --tags` above must not block it.
+          git tag -f "$tag" HEAD
           git push origin "refs/tags/$tag"
 
   publish:
