@@ -1,10 +1,12 @@
 //! The Wardrobe page (top bar, between Servers and Versions), in the glass look, shown when the
 //! cosmetics service has a founder set to show (`horizon_launcher::shop`, `watch_shop`), or with
-//! `HORIZON_COSMETICS=1`: the signed-in Microsoft account's skin wearing its items, or an
+//! `HORIZON_COSMETICS=1`: the signed-in Microsoft account's skin wearing its items in 3D
+//! (`viewer`: drag to turn, scroll to zoom, a hovered card tries its item on), or an
 //! offline name's trying the whole catalogue on (no account to prove, so nothing syncs), a
-//! row per slot, what the account owns for the chosen slot, the purchase history, a button to the
-//! website's shop (buying and the founder claim happen there, except "Claim for free" where
-//! Paddle doesn't sell: `Claim::here`, decided by the service), and three switches:
+//! row per slot, what the account owns for the chosen slot, the purchase history, one plain button
+//! to the Shop tab ("Get more cosmetics"; `shop.rs`: browsing, prices, the
+//! basket and the founder claim, paid on the website; "Claim for free" where Paddle doesn't sell:
+//! `Claim::here`, decided by the service), and three switches:
 //! Show my cosmetics (the account's, on the service), Hide
 //! other players' cosmetics and Show other players' auras and trails (the game's
 //! `horizon-extras.txt`, `horizon_cosmetics::prefs`, also in its settings).
@@ -16,9 +18,9 @@ use super::*;
 use crate::glass_ui as ui;
 use gpui::RenderImage;
 use horizon_cosmetics::prefs::{self, Others, Prefs};
-use horizon_cosmetics::{preview, Item, Texture};
+use horizon_cosmetics::{Item, Slot, Texture};
 use horizon_launcher::wardrobe::{
-    Catalogue, Change, ClaimState, Error, Me, Saved, Service, Session, SHOP_URL,
+    Catalogue, Change, ClaimState, Error, Me, Saved, Service, Session,
 };
 use horizon_theme::glass::{fill, ink, radius};
 use std::collections::HashMap;
@@ -139,7 +141,7 @@ fn offline_account(name: &str) -> account::Account {
 
 /// An offline name's skin as the preview takes it: from the skins folder, 64×64 only (older
 /// 64×32 skins and names without one show a plain figure).
-fn offline_skin(name: &str, look: &horizon_launcher::skins::Look) -> Option<(Texture, bool)> {
+fn offline_skin(name: &str, look: &horizon_launcher::skins::Look) -> Option<(Arc<Texture>, bool)> {
     if !look.skin {
         return None;
     }
@@ -150,11 +152,11 @@ fn offline_skin(name: &str, look: &horizon_launcher::skins::Look) -> Option<(Tex
         .to_rgba8();
     (image.dimensions() == (64, 64)).then(|| {
         (
-            Texture {
+            Arc::new(Texture {
                 width: 64,
                 height: 64,
                 rgba: image.into_raw(),
-            },
+            }),
             look.model == horizon_launcher::skins::Model::Slim,
         )
     })
@@ -350,7 +352,11 @@ impl Launcher {
         }
         let keep = self.wardrobe.take().filter(|w| w.uuid == account.uuid);
         let saved = Saved::load(&dir(), &account.uuid);
-        let (slot, turn) = keep.as_ref().map_or(("head", 0), |w| (w.slot, w.turn));
+        let slot = keep.as_ref().map_or("head", |w| w.slot);
+        // A session still live from the last visit is reused by the refresh.
+        let session = keep.as_ref().and_then(|w| w.session.clone());
+        // The view keeps its camera from the last visit.
+        let viewer = keep.as_ref().and_then(|w| w.viewer.clone());
         // An offline name tries the catalogue on without a session to prove; its picture comes
         // from the skins folder when the name has one.
         let offline = account.uuid.starts_with(OFFLINE_PREFIX);
@@ -366,7 +372,7 @@ impl Launcher {
             uuid: account.uuid.clone(),
             saved: saved.clone(),
             items: keep.map(|w| w.items).unwrap_or_default(),
-            session: None,
+            session: session.clone(),
             skin,
             status: Status::Loading,
             busy: true,
@@ -1156,6 +1162,81 @@ impl Launcher {
                 ),
             )
         }))
+    }
+
+    /// The Wardrobe's one way to the Shop tab, a plain secondary button (the Shop has the
+    /// cosmetics to try on and buy; paying happens on playhorizon.dev).
+    fn shop_link(&self, id: &'static str, cx: &mut Context<Self>) -> Stateful<Div> {
+        let label = "Get more cosmetics";
+        button(id, label, Kind::Secondary, &self.theme).on_click(cx.listener(
+            |this, _: &ClickEvent, _, cx| {
+                this.go(Page::Shop);
+                cx.notify();
+            },
+        ))
+    }
+
+    /// No Microsoft account selected: the way to sign in (the Wardrobe's and the Shop's).
+    fn wardrobe_sign_in(&self, cx: &mut Context<Self>) -> Div {
+        let t = self.theme;
+        let sign_in = button(
+            "wardrobe-sign-in",
+            "Sign in with Microsoft",
+            Kind::Primary,
+            &t,
+        )
+        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+            this.go(Page::Settings);
+            this.start_sign_in();
+            cx.notify();
+        }));
+        glass::plate(radius::PANEL)
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(16.))
+            .p(px(24.))
+            .child(
+                ui::text(15., FontWeight::MEDIUM, ink::FULL).child(tr("Sign in to use cosmetics.")),
+            )
+            .child(sign_in)
+    }
+
+    /// Sets whether the pointer turns the view, for its hand.
+    fn wardrobe_drag(cx: &mut Context<Self>) -> impl Fn(bool, &mut App) + Clone + 'static {
+        let page = cx.entity().downgrade();
+        move |on, cx: &mut App| {
+            let _ = page.update(cx, |this, cx| {
+                if let Some(w) = this.wardrobe.as_mut().filter(|w| w.dragging != on) {
+                    w.dragging = on;
+                    cx.notify();
+                }
+            });
+        }
+    }
+
+    /// Hovering a card tries its item on in the view (None: takes the slot's off); leaving it
+    /// takes it back off.
+    fn wardrobe_try_on(
+        slot: &'static str,
+        item: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(&bool, &mut Window, &mut App) + 'static {
+        let page = cx.entity().downgrade();
+        move |over: &bool, _: &mut Window, cx: &mut App| {
+            let _ = page.update(cx, |this, cx| {
+                let Some(w) = &mut this.wardrobe else {
+                    return;
+                };
+                let card = (slot, item.clone());
+                if *over {
+                    w.hover = Some(card);
+                } else if w.hover.as_ref() == Some(&card) {
+                    w.hover = None;
+                }
+                cx.notify();
+            });
+        }
     }
 
     /// Over the page: the service out of reach, a failure, an account that owns nothing yet, or
