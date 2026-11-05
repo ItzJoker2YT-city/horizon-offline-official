@@ -1232,27 +1232,13 @@ pub fn install(release: &Release, progress: impl Fn(f32)) -> Result<(), String> 
         .to_string()
     })?;
     let sha256 = match &release.nightly {
-        // Signed for its own version (SHA256SUMS.v2.sig), which its title names and it installs as;
-        // served under its own GitHub tag. A title that doesn't parse strictly is refused: nothing
-        // signs GitHub's publication time.
-        Some(github_tag) => {
-            let version = horizon_release_sign::nightly_title_version(&release.name)
-                .filter(|v| *v == release.tag)
-                .ok_or_else(|| {
-                    crate::i18n::trf(
-                        "This Nightly's title ({title}) doesn't name its date and commit as Horizon \
-                         signs them, so it can't be checked: it was not installed.",
-                        &[("title", &format!("{:?}", release.name))],
-                    )
-                })?;
-            crate::signed::nightly_digest(
-                github_tag,
-                &version,
-                asset,
-                &horizon_release_sign::trusted_keys(),
-                fetch_small,
-            )?
-        }
+        // Signed for the Nightly channel, served under its own GitHub tag.
+        Some(published) => crate::signed::nightly_digest(
+            published,
+            asset,
+            &horizon_release_sign::trusted_keys(),
+            fetch_small,
+        )?,
         None if is_game_tag(tag) => signed_digest(REPO, tag, asset)?,
         None => return Err(format!("{tag} is not a Horizon release.")),
     };
