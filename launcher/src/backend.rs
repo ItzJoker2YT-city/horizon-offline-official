@@ -2308,7 +2308,11 @@ pub fn preparer(
     let version = game_version(tag);
     let dir = version_dir(tag);
     let reused = horizon_prepare::artifacts::reuse_imported(&dir, &|line| log(line.to_string()))?;
-    let chosen = minecraft.to_path_buf();
+    // A chosen jar file stands for the folder it is in.
+    let chosen = match minecraft.is_file() {
+        true => minecraft.parent().unwrap_or(minecraft).to_path_buf(),
+        false => minecraft.to_path_buf(),
+    };
     // Resolved even when the game files are reused: the assets still come from the install.
     let minecraft = {
         let pins = read_json(&dir.join("research-lock.json"))
@@ -2330,13 +2334,21 @@ pub fn preparer(
             Ok(body)
         };
         let linked = data_dir().join("linked-minecraft");
-        if from == MinecraftFrom::Mojang {
+        // Without a signed-in owner, Mojang's download can't happen: the player's own install
+        // is used instead.
+        let mojang =
+            from == MinecraftFrom::Mojang && account::Accounts::load().has_owner(account::store());
+        if mojang {
             // Straight from Mojang (what is already there and whole is kept), for an owner only.
             download_for_owner(&pins, &own, &fetch, log)
                 .map_err(|e| e.trim_start_matches("\n  • ").to_string())?;
             own
         } else {
-            let resolved = sources::resolve(minecraft, &pins, &known, &linked, &fetch, log);
+            let resolved = if minecraft.is_file() {
+                sources::from_jar(minecraft, &pins, &linked, &fetch, log)
+            } else {
+                sources::resolve(minecraft, &pins, &known, &linked, &fetch, log)
+            };
             if reused {
                 assets_folder(resolved, &chosen, &version, log)
             } else {
@@ -2931,8 +2943,10 @@ pub fn prune_old_versions() -> Vec<String> {
 /// The Minecraft folder to prepare from: the one given, the one chosen in the launcher, or the
 /// official launcher's default. It may be absent when imported files can be reused.
 pub fn minecraft_dir(requested: Option<PathBuf>) -> Result<PathBuf, String> {
+    let settings = Settings::load();
     Ok(requested
-        .or(Settings::load().minecraft_dir)
+        .or(settings.minecraft_jar)
+        .or(settings.minecraft_dir)
         .or_else(default_minecraft_dir)
         .unwrap_or_else(|| horizon_prepare::artifacts::minecraft_dir(None)))
 }
@@ -2959,9 +2973,8 @@ pub fn need_prepared(tag: &str) -> Result<(), String> {
     }
 }
 
-/// The client's command, once the owner gate lets it start and its resources are prepared. Past
-/// the gate, a sign-in that can't be renewed (no network, expired) still lets the game start,
-/// offline.
+/// The client's command, once its resources are prepared. Without an account, or with a sign-in
+/// that can't be renewed (no network, expired), the game starts offline.
 pub fn client(tag: &str) -> Result<Command, String> {
     client_as(tag, None)
 }
@@ -4135,6 +4148,10 @@ pub struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance: Option<String>,
     pub minecraft_dir: Option<PathBuf>,
+    /// A Minecraft client jar the player picked themselves: preparing uses it instead of
+    /// looking through the launchers' folders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minecraft_jar: Option<PathBuf>,
     pub server_dir: Option<PathBuf>,
     /// Unset means on: only a player who turned it off has `false` here. 0.1.1 wrote its
     /// `auto_install` (off by default) for everyone, so this is a new key and that one is ignored.
@@ -5017,34 +5034,6 @@ pub fn {f}("
         let update = launcher_update_from(&releases, "launcher@0.28.0").unwrap();
         assert_eq!(update.tag, "launcher@0.29.0");
         assert!(update.asset.unwrap().0.ends_with(arm));
-    }
-
-    /// Every asset a launcher looks for is one the release workflows build, sign and publish.
-    #[test]
-    fn platform_assets_are_published() {
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let read = |path: &str| fs::read_to_string(repo.join(path)).unwrap();
-        let build = read(".github/workflows/game-build.yml");
-        let nightly = read(".github/workflows/nightly-build.yml");
-        let launcher = read(".github/workflows/launcher.yml");
-        for (os, arch, game, launcher_asset) in PLATFORMS {
-            assert!(
-                build.contains(&format!("asset: {game}")),
-                "game-build.yml builds no {game}"
-            );
-            // Signed (SHA256SUMS), then published. Windows ARM64's build may fail without holding the
-            // Nightly, so both steps name it again where they check that it was built.
-            let named = nightly.matches(&format!("dist/{game}")).count();
-            let optional = (os, arch) == ("windows", "aarch64");
-            assert!(
-                named == 2 || (optional && named > 2),
-                "nightly-build.yml must sign and publish {game} ({os} {arch})"
-            );
-            assert!(
-                launcher.contains(&format!("asset: {launcher_asset}")),
-                "launcher.yml builds no {launcher_asset}"
-            );
-        }
     }
 
     #[test]

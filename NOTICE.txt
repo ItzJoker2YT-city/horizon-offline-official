@@ -1,0 +1,19 @@
+NOTICE — Horizon Offline Launcher (unofficial)
+
+This repository publishes an unofficial offline build of the Horizon launcher:
+the official Horizon launcher sources with a small local patch that lets the
+launcher play without a Microsoft account (Horizon's MIT license permits
+building, modifying and redistributing with it).
+
+- The launcher itself is the work of the Horizon project and its contributors:
+  https://github.com/horizon-rust/horizon  (MIT, see LICENSE and THIRD_PARTY_NOTICES.md)
+
+- The offline patch was adapted from gerdaroot/Horizon-Offline-Launcher:
+  https://github.com/gerdaroot/Horizon-Offline-Launcher
+
+The game itself is NOT modified, republished or re-signed here: game versions
+are downloaded from Horizon's own releases and verified by the launcher exactly
+as the official launcher does.
+
+This project is not affiliated with, endorsed by, or connected to Mojang,
+Microsoft, or the Horizon project.

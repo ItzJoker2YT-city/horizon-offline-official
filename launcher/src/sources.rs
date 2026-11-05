@@ -412,6 +412,56 @@ pub fn resolve(
     Ok(Resolved::Folder(linked.to_path_buf()))
 }
 
+/// A client jar the player picked themselves, wherever it is: checked against the pin, then
+/// linked into the official layout with the `libraries` and `assets` of the launcher folder it
+/// sits in (the closest folder above that has them), and the version JSON beside it or Mojang's.
+pub fn from_jar(
+    jar: &Path,
+    pins: &Pins,
+    linked: &Path,
+    fetch: Fetch,
+    log: &dyn Fn(String),
+) -> Result<Resolved, String> {
+    let v = &pins.version;
+    if !jar.is_file() {
+        return Err(format!("{}: the file doesn't exist", jar.display()));
+    }
+    if sha1_file(jar).as_ref() != Some(&pins.client_sha1) {
+        return Err(format!(
+            "{} is not the Minecraft {v} release client jar. Pick the {v}.jar your launcher \
+             downloaded (versions/{v}/{v}.jar in its folder): Horizon is made for {v} only.",
+            jar.display()
+        ));
+    }
+    let folder = jar.parent().unwrap_or(jar);
+    let base = folder
+        .ancestors()
+        .take(5)
+        .find(|d| d.join("assets").is_dir() || d.join("libraries").is_dir())
+        .unwrap_or(folder)
+        .to_path_buf();
+    let manifest = [
+        jar.with_extension("json"),
+        base.join(format!("versions/{v}/{v}.json")),
+    ]
+    .into_iter()
+    .find(|m| pins.manifest_accepted(m));
+    let found = Found {
+        base,
+        client: jar.to_path_buf(),
+        manifest,
+    };
+    log(format!(
+        "Using the Minecraft {v} jar you chose ({})",
+        jar.display()
+    ));
+    if found.official_layout(v) {
+        return Ok(Resolved::Folder(found.base));
+    }
+    link_official_layout(&found, pins, linked, fetch, log)?;
+    Ok(Resolved::Folder(linked.to_path_buf()))
+}
+
 /// The pinned version JSON at `path`, from piston-meta (by its sha1) unless it is there.
 pub(crate) fn fetch_manifest(
     pins: &Pins,

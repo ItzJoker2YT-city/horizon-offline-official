@@ -10,6 +10,7 @@ mod cli;
 mod cli_tools;
 mod collection;
 mod console;
+mod crash_log;
 mod console_page;
 mod cull;
 mod datapacks_page;
@@ -1178,8 +1179,10 @@ impl Launcher {
                                 continue;
                             }
                         };
-                        // Past the gate by the developer option alone is no owner.
-                        if !self.settings.dev_offline {
+                        // Past the gate by the developer option alone is no owner, and in this
+                        // fork (`account::GATE_OPEN`) only a session means one: no owner plays
+                        // offline too.
+                        if !(self.settings.dev_offline || account::GATE_OPEN) || file.is_some() {
                             self.owner = Some(true);
                         }
                         if let Some(file) = file {
@@ -1509,12 +1512,7 @@ impl Launcher {
                     self.load_auth_statuses(false);
                     // Sign-in refuses accounts that don't own the game.
                     self.owner = Some(true);
-                    self.owner_screen_open = false;
                     self.client_error = None;
-                    if !self.settings.owner_notice_seen {
-                        self.settings.owner_notice_seen = true;
-                        self.save_settings();
-                    }
                 }
                 changed = true;
             }
@@ -1673,10 +1671,12 @@ impl Launcher {
             return;
         };
         horizon_launcher::mojang::CANCEL.store(false, Ordering::Relaxed);
+        // The jar the player picked comes first, then the folder they chose.
         let minecraft = self
             .settings
-            .minecraft_dir
+            .minecraft_jar
             .clone()
+            .or_else(|| self.settings.minecraft_dir.clone())
             .unwrap_or_else(|| horizon_prepare::artifacts::minecraft_dir(None));
         self.prepare_log.clear();
         self.prepare_error = None;
@@ -1945,6 +1945,28 @@ impl Launcher {
                     let _ = this.update(cx, |this, cx| {
                         this.settings.minecraft_dir = Some(path);
                         this.save_settings();
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Picks a Minecraft client jar to prepare from; preparing checks it is the right one.
+    fn choose_jar(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(mut paths))) = paths.await {
+                if let Some(path) = paths.pop() {
+                    let _ = this.update(cx, |this, cx| {
+                        this.settings.minecraft_jar = Some(path);
+                        this.settings.save();
                         cx.notify();
                     });
                 }
@@ -2436,6 +2458,8 @@ fn play_press(prepared: bool, owner: Option<bool>, busy: bool) -> PlayPress {
         _ if busy => PlayPress::Nothing,
         (true, _) => PlayPress::Play,
         (false, Some(true)) => PlayPress::PrepareThenPlay,
+        // This fork: no owner prepares from the player's own Minecraft install, then plays.
+        (false, _) if account::GATE_OPEN => PlayPress::PrepareThenPlay,
         (false, _) => PlayPress::Nothing,
     }
 }
@@ -3036,7 +3060,7 @@ impl Launcher {
                 .id("launcher-version")
                 .px(px(8.))
                 .pt(px(6.))
-                .child(trf("Launcher {version}", &[("version", backend::VERSION)]))
+                .child(trf("Offline launcher {version}", &[("version", backend::VERSION)]))
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.version_clicked();
                     cx.notify();
@@ -3274,11 +3298,8 @@ impl Launcher {
                 "Not prepared. Horizon can download Minecraft {version} from Mojang for your account, or use your own install.",
                 &[("version", &version)],
             ),
-            Some(false) => trf(
-                "Not prepared. Sign in with the Microsoft account that owns Minecraft {version} first.",
-                &[("version", &version)],
-            ),
-            None => backend::resources_summary(prepared, !silent, &version),
+            // No owner never stops this fork (`owner_shown`): what is prepared.
+            Some(false) | None => backend::resources_summary(prepared, !silent, &version),
         };
         let mut prepare = button(
             "prepare",
@@ -3360,6 +3381,33 @@ impl Launcher {
                     .into_any_element()
             },
         );
+        let jar = match self.settings.minecraft_jar.as_deref() {
+            Some(p) => div()
+                .font_family(theme::MONO)
+                .child(short(p))
+                .into_any_element(),
+            None => div()
+                .child(trf(
+                    "Found by itself in your launcher's folder. Or pick the {version}.jar file.",
+                    &[("version", &version)],
+                ))
+                .into_any_element(),
+        };
+        let mut jar_buttons = div().flex().gap(px(8.));
+        if self.settings.minecraft_jar.is_some() {
+            jar_buttons =
+                jar_buttons.child(button("auto-jar", "Automatic", Kind::Ghost, &t).on_click(
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.settings.minecraft_jar = None;
+                        this.settings.save();
+                        cx.notify();
+                    }),
+                ));
+        }
+        jar_buttons = jar_buttons.child(
+            button("choose-jar", "Choose jar…", Kind::Ghost, &t)
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.choose_jar(cx))),
+        );
         let mut rows = div()
             .flex()
             .flex_col()
@@ -3405,7 +3453,14 @@ impl Launcher {
                         .into_any_element(),
                 ),
                 &t,
-            )),
+            ))
+                .child(index_row(
+                    3,
+                    tr("Minecraft jar"),
+                    Some(jar),
+                    Some(jar_buttons.into_any_element()),
+                    &t,
+                )),
         };
         // The top bar shows who plays; a row only when there is something to do about it: no
         // account that owns the game (Play needs one), or offline. The glass look's top bar has
@@ -4443,7 +4498,7 @@ impl Launcher {
             }
             Some(SignInState::Done(Err(e))) => div().text_color(t.danger).child(e.clone()),
             None if self.accounts.accounts.is_empty() => div().child(tr(
-                "Horizon needs a Microsoft account that owns Minecraft: Java Edition, like other launchers. It also plays online servers with your name and skin.",
+                "A Microsoft account plays online servers with your name and skin, and lets Horizon download Minecraft from Mojang.",
             )),
             None => div().child(tr("Add another account.")),
         };
@@ -5625,6 +5680,7 @@ fn main() {
     // folders and records the error, which Settings shows with Retry and Use the default folder.
     // It keeps the migration lease for the life of the process.
     let _location_error = horizon_launcher::data_location::startup();
+    crash_log::install();
     perf::process_started();
     backend::exe_path();
     // The launcher's own installer (`update_handoff`): no window, no CLI parser.
@@ -5821,8 +5877,10 @@ mod tests {
             play_press(false, Some(true), false),
             PlayPress::PrepareThenPlay
         );
-        assert_eq!(play_press(false, Some(false), false), PlayPress::Nothing);
-        assert_eq!(play_press(false, None, false), PlayPress::Nothing);
+        // This fork (`account::GATE_OPEN`): no owner prepares from the player's own install.
+        assert_eq!(play_press(false, Some(false), false), PlayPress::PrepareThenPlay);
+        assert_eq!(play_press(false, None, false), PlayPress::PrepareThenPlay);
+        assert!(!super::starts_now(false, false, false));
         assert_eq!(play_press(false, Some(true), true), PlayPress::Nothing);
         assert_eq!(play_press(true, Some(true), true), PlayPress::Nothing);
     }

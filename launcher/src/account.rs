@@ -23,7 +23,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// The keychain service name every secret is stored under.
 pub const SERVICE: &str = "dev.playhorizon.launcher";
 const SCOPE: &str = "XboxLive.signin offline_access";
-pub const NOT_CONFIGURED: &str = "This build of the launcher has no Microsoft sign-in (HORIZON_MSA_CLIENT_ID), so it can't start the game.";
+pub const NOT_CONFIGURED: &str =
+    "This build of the launcher has no Microsoft sign-in (HORIZON_MSA_CLIENT_ID).";
+
+/// This fork plays without an account that owns the game: the owner gate stays open, as if the
+/// hidden developer option (`offline_without_owner`) were always on. Downloading the game from
+/// Mojang still needs an owner (`backend::download_for_owner`).
+pub const GATE_OPEN: bool = true;
 /// What every Play says while no account in the launcher owns the game.
 pub const NEEDS_OWNER: &str =
     "Sign in with a Microsoft account that owns Minecraft: Java Edition to play";
@@ -1639,7 +1645,7 @@ impl Accounts {
                 self.selected = Some(uuid);
             }
             Player::Offline(name) => {
-                if !offline_without_owner && !self.has_owner(store) {
+                if !(offline_without_owner || GATE_OPEN) && !self.has_owner(store) {
                     return Err(OFFLINE_NEEDS_OWNER.into());
                 }
                 let name = self.add_offline(&name)?;
@@ -1867,7 +1873,7 @@ pub fn launch_for_game(
     offline_without_owner: bool,
 ) -> Result<Launch, NoOwner> {
     match launch(ep, client_id, store, accounts) {
-        Err(NoOwner) if offline_without_owner => Ok(Launch::default()),
+        Err(NoOwner) if offline_without_owner || GATE_OPEN => Ok(Launch::default()),
         pass => pass,
     }
 }
@@ -2173,7 +2179,11 @@ fn launch_as(
     );
     let pass = accounts
         .play_as(store, who.clone())
-        .and_then(|()| launch(ep, client_id, store, accounts).map_err(|e| e.to_string()));
+        .and_then(|()| match launch(ep, client_id, store, accounts) {
+            // This fork: no owner plays offline, as `launch_for_game` lets it.
+            Err(NoOwner) if GATE_OPEN => Ok(Launch::default()),
+            pass => pass.map_err(|e| e.to_string()),
+        });
     (
         accounts.selected,
         accounts.offline_selected,

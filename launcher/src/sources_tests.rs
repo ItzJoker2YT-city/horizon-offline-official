@@ -123,6 +123,32 @@ fn assert_linked(linked: &Path, base: &Path, jar: &str) {
 /// Folders whose names cmd would read as its own syntax unquoted are still linked (Windows makes
 /// a junction through `mklink /J`; a name without spaces isn't quoted by itself).
 #[test]
+fn a_chosen_jar_is_checked_and_linked() {
+    let s = Scratch::new("jar");
+    let base = s.launcher("tl", "", "versions/26.3/26.3.jar");
+    let fetch = |_: &str| Ok(MANIFEST.to_vec());
+    let linked = s.0.join("linked");
+    let log = |_: String| {};
+    // A copy of the jar anywhere, under another name: linked with no libraries or assets.
+    let copy = s.write("Downloads/my-minecraft.jar", CLIENT);
+    let resolved = from_jar(&copy, &pins(), &linked, &fetch, &log).unwrap();
+    assert_eq!(resolved, Resolved::Folder(linked.clone()));
+    assert!(same_file(&linked.join("versions/26.3/26.3.jar"), &copy));
+    // The jar inside a launcher folder brings that folder's assets.
+    let jar = base.join("versions/26.3/26.3.jar");
+    from_jar(&jar, &pins(), &linked, &fetch, &log).unwrap();
+    assert!(linked.join("assets").exists());
+    // Another jar is refused, and says which version is needed.
+    let other = s.write("Downloads/1.21.jar", b"another version");
+    let refused = from_jar(&other, &pins(), &linked, &fetch, &log).unwrap_err();
+    assert!(
+        refused.contains("not the Minecraft 26.3 release client jar"),
+        "{refused}"
+    );
+    assert!(from_jar(&s.0.join("missing.jar"), &pins(), &linked, &fetch, &log).is_err());
+}
+
+#[test]
 fn folders_with_ampersands_are_linked() {
     let s = Scratch::new("a&b(c)");
     let jar = "libraries/com/mojang/minecraft/26.3/minecraft-26.3-client.jar";

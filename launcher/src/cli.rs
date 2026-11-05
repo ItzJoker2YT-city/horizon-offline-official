@@ -730,7 +730,8 @@ enum Cmd {
     /// Prepare a version's resources from your own Minecraft install, or from Mojang
     Prepare {
         /// The game folder of the official launcher, Prism Launcher, MultiMC, the Modrinth App,
-        /// ATLauncher or GDLauncher (default: the launcher's, then every launcher's default)
+        /// ATLauncher or GDLauncher, or a Minecraft client jar file itself (default: the jar or
+        /// folder chosen in the launcher, then every launcher's default)
         #[arg(long, conflicts_with = "download")]
         minecraft: Option<PathBuf>,
         /// Download Minecraft from Mojang for the signed-in account that owns it, instead of
@@ -741,7 +742,7 @@ enum Cmd {
         #[arg(long)]
         version: Option<String>,
     },
-    /// Start the client (needs a signed-in Microsoft account that owns Minecraft: Java Edition)
+    /// Start the client (offline without a signed-in Microsoft account)
     Play {
         #[arg(long)]
         version: Option<String>,
@@ -845,7 +846,8 @@ enum Cmd {
     },
     /// Show the launcher's settings, or set one (the Settings page): selected-version TAG,
     /// game-architecture auto|x64|arm64,
-    /// minecraft-dir PATH, server-dir PATH ("default" resets a folder), install-new-versions
+    /// minecraft-dir PATH, minecraft-jar PATH (a client jar to prepare from), server-dir PATH
+    /// ("default" resets a folder or the jar), install-new-versions
     /// on|off, prune-old-versions on|off (delete old versions after an install, keeping the
     /// selected one, the ones instances use and the newest few), keep-versions N (how many of the
     /// newest to keep; "default" is 2), opening-animation on|off, proxy http://host:port
@@ -1004,9 +1006,10 @@ pub fn command() -> clap::Command {
 pub const AI_COMMANDS: [&str; 2] = ["mcp", "agent-config"];
 
 /// The keys `settings` sets.
-const SETTING_KEYS: [&str; 15] = [
+const SETTING_KEYS: [&str; 16] = [
     "selected-version",
     "minecraft-dir",
+    "minecraft-jar",
     "server-dir",
     "install-new-versions",
     "prune-old-versions",
@@ -1035,6 +1038,7 @@ fn set_setting(s: &mut backend::Settings, key: &str, value: &str) -> Result<(), 
     match key {
         "selected-version" => s.selected = Some(backend::resolve_version(Some(value))?),
         "minecraft-dir" => s.minecraft_dir = folder(value),
+        "minecraft-jar" => s.minecraft_jar = folder(value),
         "server-dir" => s.server_dir = folder(value),
         "install-new-versions" => s.install_new_versions = Some(on_off(value)?),
         "prune-old-versions" => s.prune_old_versions = Some(on_off(value)?),
@@ -1139,6 +1143,7 @@ fn settings_json(s: &backend::Settings) -> serde_json::Value {
         "selected_version": backend::resolve_version(None).ok(),
         "game_architecture": s.game_architecture.name(),
         "minecraft_dir": s.minecraft_dir,
+        "minecraft_jar": s.minecraft_jar,
         "server_dir": backend::server_dir(None),
         "install_new_versions": s.install_new_versions.unwrap_or(true),
         "prune_old_versions": s.auto_prune(),
@@ -1929,8 +1934,8 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
                 }));
             } else if accounts.accounts.is_empty() && accounts.offline.is_empty() {
                 println!(
-                    "No Microsoft account signed in. Play needs one that owns Minecraft: Java \
-                     Edition: horizon-launcher account sign-in"
+                    "No Microsoft account signed in: Play starts offline. Online servers need \
+                     one: horizon-launcher account sign-in"
                 );
             } else {
                 for a in &accounts.accounts {
@@ -1950,9 +1955,6 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
                     println!(
                         "Playing offline as the game's own name (`account select NAME` to switch)."
                     );
-                }
-                if !accounts.has_owner(account::store()) {
-                    println!("{} {}", account::NoOwner, tr(backend::SIGN_IN_HINT));
                 }
             }
         }
