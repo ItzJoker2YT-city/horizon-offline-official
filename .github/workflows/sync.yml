@@ -129,6 +129,15 @@ jobs:
           # drop every file the patch adds). `-X theirs` = where our hunks and
           # upstream's disagree, ours win (the patch: things it deletes or changes
           # stay deleted or changed).
+          # Where official merely changed a file the flavor deletes (its `.github`
+          # workflows and design, touched again by launcher@0.2.43), a plain pick
+          # halts on the modify/delete fight it cannot settle. The watcher's rule
+          # here is: what the flavor is rid of, this tree gets rid of first — then
+          # the patch's deletion of the same files merges as "both sides deleted"
+          # and ours win (this repo's CI replaces theirs outright).
+          git diff --diff-filter=D --name-only "$PATCH_SHA^" main | while read -r p; do
+            rm -f "$p"
+          done
           git cherry-pick -n -X theirs "$PATCH_SHA^..main"
           # Our CI files, not the official tag's: sync builds only ever run ours.
           rm -rf .github
