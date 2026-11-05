@@ -68,6 +68,13 @@ def install_datapack_fixtures(world, predicates, functions, jar, advancements=No
         target.write_text(json.dumps(advancement), encoding='utf-8')
 
 
+    for identifier, recipe in (recipes or {}).items():
+        namespace, path = identifier.split(':', 1)
+        target = pack / 'data' / namespace / 'recipe' / (path + '.json')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(recipe), encoding='utf-8')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--prepare', action='store_true')
@@ -75,6 +82,8 @@ def main():
                         help='use string sherd input in the pot data group (known separate codec gap)')
     parser.add_argument('--limit', type=int, default=40, help='print at most this many mismatches')
     parser.add_argument('--allow-gaps', action='store_true', help='report mismatches without failing')
+    parser.add_argument('--wolf-anger-clock-diagnostic', action='store_true',
+                        help='retain the separate loaded-NoAI absolute anger clock diagnostic')
     parser.add_argument('--only', help='run only corpus groups whose name contains this')
     parser.add_argument('--array-storage-diagnostic', action='store_true',
                         help='run all numeric-array edit cases, including the known wildcard/string storage side effects')
@@ -102,10 +111,25 @@ def main():
     parser.add_argument("--boat-item-hit-fixture", action="store_true")
     parser.add_argument("--reference-only", action="store_true")
     parser.add_argument("--boat-motion-diagnostic", action="store_true")
+    parser.add_argument('--reinforcement-original-diagnostic', action='store_true', help='replay the original unisolated174/108 fixture, retaining its terrain prerequisite failure')
+    parser.add_argument('--reinforcement-target-diagnostic', action='store_true', help='retain the separate creative-callee target relation record (full209)')
+    parser.add_argument('--reinforcement-raw-diagnostic', action='store_true', help='add unnormalized full callee snapshots; not the typed gate')
     parser.add_argument("--pufferfish-contact-fixture", action="store_true")
     parser.add_argument("--pufferfish-body-diagnostic", action="store_true")
     parser.add_argument('--moving-piston-history-diagnostic', action='store_true',
                         help='retain the full piston presentation/default-origin controls, including H191 insertion-history gaps')
+    parser.add_argument("--armor-stand-honey-fixture", action="store_true")
+    parser.add_argument("--pufferfish-mob-fixture", action="store_true")
+    parser.add_argument("--pufferfish-mob-duration-diagnostic", action="store_true")
+    parser.add_argument("--pufferfish-mob-overlap-control", action="store_true")
+    parser.add_argument("--map-decoration-namespace-fixture", action="store_true")
+    parser.add_argument("--map-decoration-empty-diagnostic", action="store_true")
+    parser.add_argument('--piglin-anger-memory-fixture', action='store_true')
+    parser.add_argument('--piglin-anger-raw-diagnostic', action='store_true')
+    parser.add_argument('--piglin-anger-memory-diagnostic', action='store_true')
+    parser.add_argument('--map-decoration-patch-fixture', action='store_true')
+    parser.add_argument('--map-decoration-removal-diagnostic', action='store_true')
+    parser.add_argument("--selector-bounds-fixture", action="store_true")
     args = parser.parse_args()
     build = args.work_dir.resolve() if args.work_dir else lab.LOCAL / 'command-exec-parity'
     build.mkdir(parents=True, exist_ok=True)
@@ -147,6 +171,18 @@ def main():
     if args.sulfur_power_load_diagnostic:
         groups = [('setup', corpus_module.group_setup()),
                   ('sulfur powered-load diagnostic', corpus_module.sulfur_cube_fuse_ticks(True))]
+    if args.map_decoration_namespace_fixture:
+        try:
+            from .map_decoration_namespace_corpus import map_decoration_namespaces
+        except ImportError:
+            from map_decoration_namespace_corpus import map_decoration_namespaces
+        groups = [("setup", corpus_module.group_setup()), ("map decoration namespaces", map_decoration_namespaces(args.map_decoration_empty_diagnostic))]
+    if args.armor_stand_honey_fixture:
+        try:
+            from .armor_stand_honey_corpus import armor_stand_honey
+        except ImportError:
+            from armor_stand_honey_corpus import armor_stand_honey
+        groups = [("setup", corpus_module.group_setup()), ("armor stand honey slide", armor_stand_honey())]
     if args.mob_quad_fixture:
         try:
             from .mob_quad_leash_corpus import mob_quad_leash
@@ -189,6 +225,10 @@ def main():
     if args.boat_item_hit_fixture:
         from boat_item_hit_corpus import boat_item_hits
         groups = [('boat item hit', boat_item_hits(args.boat_motion_diagnostic))]
+    if args.pufferfish_mob_fixture:
+        from pufferfish_mob_contact_corpus import mob_contacts, overlapping_cod_control
+        groups = [("pufferfish mob contact", overlapping_cod_control() if args.pufferfish_mob_overlap_control
+                   else mob_contacts(args.pufferfish_mob_duration_diagnostic))]
     if args.pufferfish_contact_fixture:
         from pufferfish_contact_corpus import contact_fixture
         groups = [("pufferfish player contact", contact_fixture(args.pufferfish_body_diagnostic))]
@@ -197,6 +237,19 @@ def main():
     if args.slot_codec_diagnostic:
         groups.append(('slot source codec diagnostic', [corpus_module.cmd(
             '/item fill block 4 200 4 {type:"minecraft:slot_range",slots:"container.99"} with diamond')]))
+    if any(name in isolated_reinforcements for name, _ in groups) and sum(name != 'setup' for name, _ in groups) != 1:
+        parser.error('reinforcement fixtures require --only with one exact group')
+    if any(name in isolated_recipes for name, _ in groups) and sum(name != 'setup' for name, _ in groups) != 1:
+        parser.error('crafting recipe fixtures require --only with one exact group')
+    if args.piglin_anger_memory_fixture:
+        from piglin_anger_memory_corpus import piglin_anger_memory
+        groups = [('setup', corpus_module.group_setup()), ('piglin live anger memory', piglin_anger_memory(args.piglin_anger_raw_diagnostic, args.piglin_anger_memory_diagnostic))]
+    if args.map_decoration_patch_fixture:
+        from map_decoration_patch_corpus import map_decoration_patches
+        groups = [('setup', corpus_module.group_setup()), ('map decoration saved patch', map_decoration_patches(args.map_decoration_removal_diagnostic))]
+    if args.selector_bounds_fixture:
+        from selector_bounds_corpus import selector_bounds
+        groups = [("setup", corpus_module.group_setup()), ("selector entity bounds", selector_bounds())]
     script = []
     for _, lines in groups:
         script.extend(lines)
@@ -205,6 +258,13 @@ def main():
                                             ensure_ascii=False) + '\n' for op in script), encoding='utf-8')
     predicates = corpus_module.predicate_selector_fixtures([name for name, _ in groups])
     functions = corpus_module.function_return_fixtures([name for name, _ in groups])
+    recipes = corpus_module.crafting_priority_recipes([name for name, _ in groups])
+    if any(name == 'transmute result patches' for name, _ in groups):
+        try:
+            from .transmute_patch_corpus import fixture_recipes
+        except ImportError:
+            from transmute_patch_corpus import fixture_recipes
+        recipes.update(fixture_recipes())
     advancements = corpus_module.advancement_reward_fixtures([name for name, _ in groups])
 
     if args.pufferfish_contact_fixture:
@@ -233,14 +293,21 @@ def main():
             sys.exit('Java direct underwater reference prerequisite failed')
     if args.reference_only:
         reference = [json.loads(line) for line in (build / 'vanilla.jsonl').read_text().splitlines()]
-        recorded = [op for op in script if op['op'] in ('player_state', 'player_loop') or (op['op'] == 'cmd' and op.get('record', True))]
+        recorded = [op for op in script if op['op'] in ('player_state', 'player_loop', 'map_state', 'frame_map_state', 'mob_anger', 'menu_state') or
+                    (op['op'] == 'cmd' and op.get('record', True)) or
+                    (op['op'] == 'tick' and op.get('record'))]
         if len(recorded) != len(reference):
             sys.exit('reference-only record count differs')
         for op, row in zip(recorded, reference):
+            require_anger_reference(op, row)
             if "expect_observation" in op and row.get("state") != op["expect_observation"]:
                 sys.exit(f"Java observation prerequisite failed: {op}: {row}")
             if 'expect_result' in op and row.get('results') != [[True, op['expect_result']]]:
                 sys.exit(f'Java fixture guard failed: {op}: {row.get("results")}')
+            if 'expect_callback' in op and row.get('results') != [op['expect_callback']]:
+                sys.exit(f'Java callback guard failed: {op}: {row.get("results")}')
+            if 'expect_map' in op and row.get('messages') != [[[op['expect_map'], [None, False, False, False, False, False]]]]:
+                sys.exit(f'Java map prerequisite failed: {op}: {row}')
         print(f'Java reference: {len(reference)} records, fixture guards passed')
         return
 
@@ -283,12 +350,13 @@ def main():
     rust = [json.loads(l) for l in (build / 'rust.jsonl').open(encoding='utf-8')]
     if len(vanilla) != len(rust):
         sys.exit(f'record count differs: vanilla {len(vanilla)} rust {len(rust)}')
-    recorded_ops = [op for op in script if op['op'] in ('falling', 'destroy_progress', 'weather_state', 'chunk_ready', 'server_distances', 'player_state', 'player_loop') or
+    recorded_ops = [op for op in script if op['op'] in ('falling', 'destroy_progress', 'weather_state', 'chunk_ready', 'server_distances', 'map_state', 'frame_map_state', 'light', 'player_state', 'player_loop', 'mob_anger', 'menu_state') or
                     (op['op'] == 'cmd' and op.get('record', True)) or
                     (op['op'] == 'tick' and op.get('record'))]
     if len(recorded_ops) != len(vanilla):
         sys.exit(f'script record count differs: expected {len(recorded_ops)}, got {len(vanilla)}')
     for op, reference in zip(recorded_ops, vanilla):
+        require_anger_reference(op, reference)
         if "expect_observation" in op and reference.get("state") != op["expect_observation"]:
             sys.exit(f"Java observation prerequisite failed: {op}: {reference}")
         if 'expect_result' in op and reference.get('results') != [[True, op['expect_result']]]:
@@ -299,12 +367,16 @@ def main():
             sys.exit(f'Java loaded contract failed: {op}: {reference}')
         if 'expect_callback' in op and reference.get('results') != [op['expect_callback']]:
             sys.exit(f'Java callback guard failed: {op}: {reference.get("results")}')
+        if 'expect_map' in op and reference.get('messages') != [[[op['expect_map'], [None, False, False, False, False, False]]]]:
+            sys.exit(f'Java map fixture control failed: {op}: {reference}')
         if 'expect_state' in op and reference.get('results') != [[True, v] for v in op['expect_state']]:
             sys.exit(f'Java weather guard failed: {op["label"]}: {reference.get("results")}')
+        if 'expect_light' in op and reference.get('results') != [[True, n] for n in op['expect_light']]:
+            sys.exit(f'Java light prerequisite failed: {op}: {reference}')
     commands_by_group = []
     index = 0
     for name, lines in groups:
-        n = sum(1 for op in lines if op['op'] in ('falling', 'destroy_progress', 'weather_state', 'chunk_ready', 'server_distances', 'player_state', 'player_loop') or (op['op'] == 'cmd' and op.get('record', True)) or (op['op'] == 'tick' and op.get('record')))
+        n = sum(1 for op in lines if op['op'] in ('falling', 'destroy_progress', 'weather_state', 'chunk_ready', 'server_distances', 'map_state', 'frame_map_state', 'light', 'player_state', 'player_loop', 'mob_anger', 'menu_state') or (op['op'] == 'cmd' and op.get('record', True)) or (op['op'] == 'tick' and op.get('record')))
         commands_by_group.append((name, index, index + n))
         index += n
     mismatches = []
@@ -343,6 +415,22 @@ def main():
     if mismatches and not args.allow_gaps:
         sys.exit(f'{len(mismatches)} command execution mismatches; see {build}')
     print(f'Command execution parity report: {report_path}')
+
+
+def require_anger_reference(op, record):
+    """Validate independent live-clock expectations, retaining raw absolute ends."""
+    expected = op.get('expect_anger')
+    if expected is None:
+        return
+    state = record.get('state', {})
+    fields = ('uuid', 'kind', 'index')
+    if (any(state.get(key) != expected[key] for key in fields) or
+            state.get('serializer') != 2 or type(state.get('value')) is not int or
+            type(state.get('game_time')) is not int):
+        sys.exit(f'Java anger identity/type guard failed: {op}: {record}')
+    value = -1 if expected['delta'] is None else state['game_time'] + expected['delta']
+    if state['value'] != value:
+        sys.exit(f'Java anger live-clock guard failed: {op}: {record}')
 
 
 MASKS = [

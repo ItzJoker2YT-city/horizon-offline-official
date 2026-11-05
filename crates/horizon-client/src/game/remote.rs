@@ -1265,6 +1265,7 @@ impl Game<'_> {
             Some(reason) => horizon_client::multiplayer::Screen::Disconnected {
                 reason,
                 retry: None,
+                lines: std::cell::Cell::new(1),
             },
             None => horizon_client::multiplayer::Screen::list(&saves),
         });
@@ -1456,7 +1457,7 @@ impl Game<'_> {
                 content,
                 signature,
                 trust.tag(),
-                self.ticks,
+                self.visual_ticks(),
                 focused,
             );
         } else {
@@ -1468,7 +1469,7 @@ impl Game<'_> {
                 content,
                 indicator,
                 source,
-                self.ticks,
+                self.visual_ticks(),
                 focused,
             );
         }
@@ -1594,9 +1595,10 @@ impl Game<'_> {
         r.chat_queue
             .retain(|chat| chat.signature.as_ref() != Some(&signature));
         if r.chat_queue.len() == queued {
+            let ticks = self.visual_ticks();
             self.ui
                 .chat
-                .delete_message(&self.gui.atlas, &signature, self.ticks);
+                .delete_message(&self.gui.atlas, &signature, ticks);
         }
         Ok(())
     }
@@ -4268,9 +4270,10 @@ impl Game<'_> {
                 if p.event == super::combat::DROWN_EVENT {
                     self.remote_drown(p.id);
                 }
-                // Entity event 53: the honey slide particles of a player
-                // sliding down a honey block (HoneyBlock.showSlideParticles).
-                if p.event == 53 {
+                // Entity events 53 and 54: honey crumbs while sliding, and the
+                // ten from a landing (`HoneyBlock.showSlideParticles` /
+                // `showJumpParticles`).
+                if horizon_client::landing::honey_particle_count(p.event).is_some() {
                     let at = if self.remote.as_ref().is_some_and(|r| r.entity_id == p.id) {
                         self.player
                             .as_ref()
@@ -4282,7 +4285,7 @@ impl Game<'_> {
                             .map(|m| [m.position.x, m.position.y, m.position.z])
                     };
                     if let Some(at) = at {
-                        self.honey_slide_particles(at);
+                        self.honey_entity_particles(at, p.event);
                     }
                 }
                 if p.event == super::consume::USE_ITEM_COMPLETE_EVENT
@@ -5935,7 +5938,8 @@ impl Game<'_> {
         self.ticks += 1;
         self.repro_tick();
         // Hud.tick ends with ChatComponent.tick.
-        self.ui.chat.tick(&self.gui.atlas, self.ticks);
+        let chat_ticks = self.visual_ticks();
+        self.ui.chat.tick(&self.gui.atlas, chat_ticks);
         self.tick_sign_editor();
         self.track_experience_display();
         self.tick_enchanting_book();
@@ -5957,7 +5961,13 @@ impl Game<'_> {
         // the time only while the level runs normally.
         let running = self.clock.world_runs();
         self.boss_overlay.tick_darken(running);
-        self.tick_item_activation();
+        // Under `HORIZON_STILL` the frame's countdowns (this one, the hotbar's pop, the HUD's
+        // below) wait for the world, as the border's size change does in any frozen level: a
+        // frozen client keeps ticking, as many ticks as the run took.
+        let hold = !running && self.clock.still();
+        if !hold {
+            self.tick_item_activation();
+        }
         if running {
             self.world.game_time += 1;
             self.remote_clock_tick();
@@ -5982,8 +5992,10 @@ impl Game<'_> {
         // trying again a tick before the server's entry ends.
         self.cooldowns.tick();
         // Inventory.tick's ItemStack.inventoryTick: the pop time runs down.
-        for pop in &mut self.hotbar_pop {
-            *pop = pop.saturating_sub(1);
+        if !hold {
+            for pop in &mut self.hotbar_pop {
+                *pop = pop.saturating_sub(1);
+            }
         }
         // ClientLevel.tick: the border's size change.
         self.border.tick();
@@ -6014,12 +6026,23 @@ impl Game<'_> {
         if running {
             self.tick_particles();
         }
-        self.tick_client_ambient();
-        self.tick_client_effects();
+        self.tick_frame_visuals(running);
+        // Under `HORIZON_STILL` they wait for the world too: endermen's and blazes' particles
+        // draw on the particles' random, and effects count down, on every tick a frozen
+        // client runs, as many as the run took to get there.
+        if !hold {
+            self.tick_client_ambient();
+            self.tick_client_effects();
+        }
         // Player.tick's sleep counter (the darkening and the wake-up fade).
         self.sleep_timer = super::tick_sleep_timer(self.sleep_timer, self.sleeping.is_some());
         // Gui.tick: the titles, the action bar and the held item's name.
-        self.tick_hud();
+        if !hold {
+            self.tick_hud();
+        } else {
+            // Only its countdowns wait: lying down still opens the bed's chat, waking closes it.
+            self.tick_in_bed_chat();
+        }
         self.tick_subtitles();
         self.tick_client_load();
         let entity_collisions = self.player_entity_collisions();
@@ -6107,7 +6130,7 @@ impl Game<'_> {
         // reaches its own write when this window is a server client.
         self.rope_rot_old = (self.yaw, self.pitch);
         // A passenger moves with its vehicle (Entity.rideTick), not by itself.
-        let riding = self.screen != Screen::Dead && self.remote_ride(keys);
+        let riding = self.screen != Screen::Dead && self.remote_ride(keys, sprint_window)?;
         // The server sends no passenger's position: they sit where their
         // vehicles are now.
         self.position_riders();
@@ -6287,9 +6310,10 @@ impl Game<'_> {
                     self.audio
                         .play("minecraft:block.honey_block.slide", Some(feet), 1.0, 1.0);
                 }
-                // LivingEntity.causeFallDamage on the client's own level: the
-                // fall sound is heard here (LocalPlayer.playSound); the
-                // server's copy skips this player (Player.playSound).
+                // LivingEntity.causeFallDamage and HoneyBlock.fallOn on the
+                // client's own level: the fall and honey sounds are heard here
+                // (LocalPlayer.playSound); the server's copy skips this player
+                // (Player.playSound).
                 horizon_client::motion::MotionEvent::Fall(
                     horizon_client::landing::FallEvent::Sound {
                         sound,
@@ -6298,7 +6322,10 @@ impl Game<'_> {
                         ..
                     },
                 ) => {
-                    if let Some(name) = sound.player_fall_sound() {
+                    if let Some(name) = sound
+                        .player_fall_sound()
+                        .or_else(|| sound.honey_landing_sound())
+                    {
                         self.audio.play(name, Some(feet), volume, pitch);
                     }
                 }
@@ -6919,6 +6946,7 @@ impl Game<'_> {
                     &mut next_float,
                     border,
                     &self.res.motion().fluids,
+                    &mut |_, _| {},
                 );
                 // `tick` set `previous` to the stepped position: keep the
                 // pre-step one, as `xo` is in vanilla.
@@ -8527,8 +8555,8 @@ impl Game<'_> {
             }
             // TridentItem.use: not about to break, Riptide only in water or rain.
             "minecraft:trident" => {
-                self.use_trident(held);
-                return true;
+                // FAIL: no dip, and the off hand gets its turn.
+                return self.use_trident(held);
             }
             // SpyglassItem.use (its sound is the server's).
             "minecraft:spyglass" => true,
@@ -9225,6 +9253,9 @@ impl Game<'_> {
             return;
         }
         if let Some(command) = message.strip_prefix('/') {
+            if self.studio_command(command) {
+                return;
+            }
             self.send_command(command);
         } else {
             self.send_signed_chat(message);

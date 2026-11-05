@@ -1205,7 +1205,7 @@ impl Hub {
         let joined = C::SystemChat(play::SystemChat {
             content: yellow_names(
                 "multiplayer.player.joined",
-                vec![display_name(self.guests[i].uuid, &name)],
+                vec![self.player_display_name(self.guests[i].uuid, &name)],
             ),
             overlay: false,
         })
@@ -1950,7 +1950,7 @@ impl Hub {
         let left = C::SystemChat(play::SystemChat {
             content: yellow_names(
                 "multiplayer.player.left",
-                vec![display_name(g.uuid, &g.name)],
+                vec![self.player_display_name(g.uuid, &g.name)],
             ),
             overlay: false,
         })
@@ -1959,9 +1959,53 @@ impl Hub {
             if o.tab_hidden.remove(&g.uuid) {
                 continue;
             }
-            o.sender.send(left.clone());
+            if !g.quiet_leave {
+                o.sender.send(left.clone());
+            }
         }
         g
+    }
+
+    /// Takes the frozen player `uuid` out of the world because a proxy moved it to another
+    /// server, for the hand-over `id`: the others see it go (its entity and its player-list
+    /// entry), but nothing is saved (the other server has the player now) and, unless
+    /// `announce`, the "left the game" line is not sent. The game is told it left, marked
+    /// released, so it saves nothing.
+    ///
+    /// Refused when the player is not in that hand-over: another one, or none because the
+    /// freeze ran out (the player has played on since, and the record the other server has is
+    /// older), or a player who died while frozen.
+    pub fn release_moved(
+        &mut self,
+        uuid: u128,
+        id: u128,
+        announce: bool,
+    ) -> Result<(), &'static str> {
+        let i = self.handover_of(uuid, id)?;
+        let g = &mut self.guests[i];
+        g.quiet_leave = !announce;
+        g.left_reason = "moved to another server".to_owned();
+        g.sender
+            .disconnect(translatable("multiplayer.disconnect.generic", &[]));
+        let mut gone = self.remove_guest(i, "moved to another server");
+        gone.released = true;
+        gone.handover = None;
+        self.pending_kicks.push(HostEvent::Left(Box::new(gone)));
+        Ok(())
+    }
+
+    /// The guest index of the player `uuid` while it is frozen for the hand-over `id`.
+    pub fn handover_of(&self, uuid: u128, id: u128) -> Result<usize, &'static str> {
+        let Some(i) = self.guests.iter().position(|g| g.uuid == uuid) else {
+            return Err("that player is not connected to this server");
+        };
+        let g = &self.guests[i];
+        match &g.handover {
+            _ if g.dead => Err("that player died during the hand-over"),
+            None => Err("that player is not in a hand-over (or its freeze ran out)"),
+            Some(h) if h.id != id => Err("that is not the player's current hand-over"),
+            Some(_) => Ok(i),
+        }
     }
 
     /// `ServerTickRateManager.updateStepTicks` / `updateStateToClients`:
@@ -4500,7 +4544,7 @@ mod tests {
     fn hub_with_sync(sync: SyncData) -> (Hub, std::sync::mpsc::Receiver<crate::lan::Out>) {
         let config = crate::lan::NetConfig {
             announce: false,
-            ..crate::lan::NetConfig::lan(0, "EffectSyncTest".into(), 2)
+            ..crate::lan::NetConfig::loopback(0, "EffectSyncTest".into(), 2)
         };
         let sync = std::sync::Arc::new(sync);
         let lan = Lan::start_with(sync.clone(), config).unwrap();
