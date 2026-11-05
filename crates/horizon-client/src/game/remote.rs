@@ -171,8 +171,9 @@ fn hurt_sound_for(
 fn entity_sound_state(
     id: i32,
     player: Option<(i32, [f64; 3], bool)>,
-    mobs: &[Mob],
+    mob: Option<horizon_client::sound_engine::SoundEntityState>,
     tracked: &HashMap<i32, Tracked>,
+    dragon: Option<(i32, [f64; 3])>,
 ) -> Option<horizon_client::sound_engine::SoundEntityState> {
     use horizon_client::sound_engine::SoundEntityState;
     if let Some((player_id, position, silent)) = player
@@ -184,18 +185,20 @@ fn entity_sound_state(
             removed: false,
         });
     }
-    if let Some(m) = mobs.iter().find(|m| m.id as i32 == id) {
-        return Some(SoundEntityState {
-            position: [m.position.x, m.position.y, m.position.z],
-            silent: m.silent,
-            removed: m.removed,
-        });
+    let mut state = mob.or_else(|| {
+        tracked.get(&id).map(|t| SoundEntityState {
+            position: t.position,
+            silent: t.silent,
+            removed: false,
+        })
+    })?;
+    // The dragon's Mob is metadata storage; only Dragon follows its movement.
+    if let Some((dragon_id, position)) = dragon
+        && dragon_id == id
+    {
+        state.position = position;
     }
-    tracked.get(&id).map(|t| SoundEntityState {
-        position: t.position,
-        silent: t.silent,
-        removed: false,
-    })
+    Some(state)
 }
 
 /// `ClientboundOpenScreenPacket.title` as a container screen draws it: the
@@ -489,6 +492,9 @@ pub(super) struct Remote {
     pub(super) builtin: Arc<Builtin>,
     lang: Arc<Language>,
     pub(super) registries: Arc<Dynamic>,
+    /// The game's enchantments and the server's that it lacks (a data
+    /// pack's), from their synced data; `None` when the server has none.
+    pub(super) enchantments: Option<Arc<horizon_client::enchant::Enchantments>>,
     pub(super) joined: bool,
     /// `ServerReconfigScreen` is up since this tick.
     pub(super) reconfiguring: Option<u64>,
@@ -776,7 +782,7 @@ impl Game<'_> {
         }
     }
     pub(super) fn remote_sound_entity_state(
-        &self,
+        &mut self,
         id: i32,
     ) -> Option<horizon_client::sound_engine::SoundEntityState> {
         let r = self.remote.as_ref()?;
@@ -787,9 +793,29 @@ impl Game<'_> {
                 r.local_entity_silent,
             )
         });
-        let mut state = entity_sound_state(id, player, &self.mobs, &r.entities)?;
-        // Vehicles, projectiles and other simulated objects may have moved since
-        // the last tracking packet, just as the mob interpolation has.
+        // The local player is not in mobs, so avoid a guaranteed index miss.
+        if player.is_some_and(|p| p.0 == id) {
+            return entity_sound_state(id, player, None, &r.entities, None);
+        }
+        let mob = self.mob_index.get(&self.mobs, id as u32).map(|m| {
+            horizon_client::sound_engine::SoundEntityState {
+                position: [m.position.x, m.position.y, m.position.z],
+                silent: m.silent,
+                removed: m.removed,
+            }
+        });
+        let dragon = self
+            .dragon
+            .as_ref()
+            .map(|d| (d.id as i32, [d.position.x, d.position.y, d.position.z]));
+        let mut state = entity_sound_state(id, player, mob, &r.entities, dragon)?;
+        // Mob states already use the live position. In particular,
+        // level_entity would find the dragon's stale Mob before its Dragon.
+        if mob.is_some() || dragon.is_some_and(|d| d.0 == id) {
+            return Some(state);
+        }
+        // Vehicles, projectiles and other simulated objects may have moved
+        // since the last tracking packet.
         if let Some(position) = self
             .level_entity(id)
             .and_then(|target| self.target_position(target))
@@ -1044,6 +1070,7 @@ impl Game<'_> {
                 .unwrap_or_else(|| "Connecting to the server...".into()),
             lang,
             registries: Arc::new(Dynamic::default()),
+            enchantments: None,
             joined: false,
             reconfiguring: None,
             logged_in: false,
@@ -2153,7 +2180,25 @@ impl Game<'_> {
                     .collect()
             })
             .unwrap_or_default();
+        let entries: Vec<(&str, serde_json::Value)> = registries
+            .registries
+            .get("minecraft:enchantment")
+            .into_iter()
+            .flatten()
+            .filter_map(|(name, data)| {
+                Some((
+                    name.as_str(),
+                    horizon_client::scoreboard::tag_to_json(data.as_ref()?),
+                ))
+            })
+            .collect();
+        let enchantments = self
+            .stations()
+            .enchantments
+            .with_entries(entries.iter().map(|(n, v)| (*n, v)))
+            .map(Arc::new);
         if let Some(r) = self.remote.as_mut() {
+            r.enchantments = enchantments;
             let bits = ceil_log2(biomes.len());
             let column = r.chunk_format.layout();
             r.chunk_format =
@@ -4239,11 +4284,11 @@ impl Game<'_> {
                 if p.event == 20 && self.mobs.iter().any(|m| m.id == p.id as u32) {
                     self.poof_particles(p.id as u32);
                 }
-                // Villager 12, 13 and 14, TamableAnimal and AbstractHorse 6 and
-                // 7, Animal and Allay 18: the particles about the mob.
-                if matches!(p.event, 6 | 7 | 12 | 13 | 14 | 18 | 40 | 41) {
-                    self.entity_event_particles(p.id as u32, p.event);
-                }
+                // The particle bursts of Villager 12 to 14 and 42, TamableAnimal
+                // and AbstractHorse 6 and 7, Animal and Allay 18, Ocelot 40 and
+                // 41, Dolphin 38: the table in `entity_event_burst` is the one
+                // list of them; any other event draws nothing here.
+                self.entity_event_particles(p.id as u32, p.event);
                 // Snowball and ThrownEgg.handleEntityEvent 3: the crumbs where
                 // the projectile is (the server removes it right after).
                 if p.event == 3 {
@@ -5632,7 +5677,10 @@ impl Game<'_> {
             return;
         };
         let at = Vec3::new(p[0], p[1], p[2]);
-        let bob_offset = self.world.random.next_float() * std::f32::consts::PI * 2.0;
+        // ItemEntity's constructor draws bobOffs from the item's own random.
+        let bob_offset = horizon_client::mobs::entity_random(id as u32, at).next_float()
+            * std::f32::consts::PI
+            * 2.0;
         self.dropped.push(ItemEntity {
             rotation: [0.0, 0.0],
             join: Default::default(),
@@ -5997,8 +6045,10 @@ impl Game<'_> {
                 *pop = pop.saturating_sub(1);
             }
         }
-        // ClientLevel.tick: the border's size change.
-        self.border.tick();
+        // ClientLevel.tick: the border's size change, while the level runs.
+        if running {
+            self.border.tick();
+        }
         self.player_border();
         self.tick_remote_entities(running);
         self.tick_random_textures();
@@ -7000,6 +7050,8 @@ impl Game<'_> {
         for (item, ticks, at, eye, pitch, yaw) in using {
             self.remote_player_eating(&item, ticks, at, eye, pitch, yaw);
         }
+        // ClientLevel.tick: the sky flash fades in a frozen level too.
+        self.flash = self.flash.saturating_sub(1);
         if running {
             self.guardian_bubbles();
             // The dragon: LivingEntity's interpolation, inside its aiStep.
@@ -7063,8 +7115,7 @@ impl Game<'_> {
                 },
             );
             self.tick_remote_projectiles(&mut step);
-            // LightningBolt.tick on a client, and the sky flash fading.
-            self.flash = self.flash.saturating_sub(1);
+            // LightningBolt.tick on a client.
             self.tick_bolts();
         }
         lerps.retain(|_, l| l.steps > 0);
@@ -7680,7 +7731,11 @@ impl Game<'_> {
                 .is_some_and(|r| r.level_players.contains_key(&id));
             if !player && self.remote_mob_takes(i, hand) {
                 self.remote_feed_particles(i, hand);
-                self.with_hand(hand, Game::swing_arm);
+                // As for the objects above, only SUCCESS swings the hand: a
+                // CONSUME ends the click without one.
+                if self.remote_mob_swings(i, hand) {
+                    self.with_hand(hand, Game::swing_arm);
+                }
                 return true;
             }
         }
@@ -11444,28 +11499,28 @@ mod tests {
         );
         let player = Some((2, [0.5, 70.0, 0.5], false));
         assert_eq!(
-            super::entity_sound_state(2, player, &[], &tracked)
+            super::entity_sound_state(2, player, None, &tracked, None)
                 .filter(|s| !s.silent)
                 .map(|s| s.position),
             Some([0.5, 70.0, 0.5]),
             "the local player is named by Remote.entity_id"
         );
         assert_eq!(
-            super::entity_sound_state(7, player, &[], &tracked)
+            super::entity_sound_state(7, player, None, &tracked, None)
                 .filter(|s| !s.silent)
                 .map(|s| s.position),
             Some([8.5, 64.0, -3.5]),
             "another entity the server spawned"
         );
         assert_eq!(
-            super::entity_sound_state(9, player, &[], &tracked)
+            super::entity_sound_state(9, player, None, &tracked, None)
                 .filter(|s| !s.silent)
                 .map(|s| s.position),
             None,
             "getEntity is null: handleSoundEntityEvent returns"
         );
         assert_eq!(
-            super::entity_sound_state(2, None, &[], &tracked)
+            super::entity_sound_state(2, None, None, &tracked, None)
                 .filter(|s| !s.silent)
                 .map(|s| s.position),
             None,
@@ -11484,15 +11539,40 @@ mod tests {
                 silent: true,
             },
         );
-        let state = super::entity_sound_state(7, None, &[], &tracked).unwrap();
+        let state = super::entity_sound_state(7, None, None, &tracked, None).unwrap();
         assert!(state.silent);
         assert!(!state.removed);
         assert_eq!(state.position, [8.5, 64.0, -3.5]);
         let player =
-            super::entity_sound_state(2, Some((2, [1.0, 2.0, 3.0], true)), &[], &tracked).unwrap();
+            super::entity_sound_state(2, Some((2, [1.0, 2.0, 3.0], true)), None, &tracked, None)
+                .unwrap();
         assert!(player.silent);
-        assert!(super::entity_sound_state(9, None, &[], &tracked).is_none());
+        assert!(super::entity_sound_state(9, None, None, &tracked, None).is_none());
     }
+    #[test]
+    fn a_dragon_sound_uses_live_movement_without_losing_mob_metadata() {
+        use horizon_client::sound_engine::SoundEntityState;
+        let stale = SoundEntityState {
+            position: [0.0, 64.0, 0.0],
+            silent: true,
+            removed: false,
+        };
+        let tracked = std::collections::HashMap::new();
+        for position in [[24.0, 80.0, -16.0], [25.5, 81.0, -18.0]] {
+            let state =
+                super::entity_sound_state(7, None, Some(stale), &tracked, Some((7, position)))
+                    .unwrap();
+            assert_eq!(state.position, position);
+            assert!(state.silent);
+            assert!(!state.removed);
+        }
+        let unrelated =
+            super::entity_sound_state(7, None, Some(stale), &tracked, Some((8, [99.0; 3])))
+                .unwrap();
+        assert_eq!(unrelated.position, stale.position);
+        assert!(super::entity_sound_state(7, None, None, &tracked, Some((7, [99.0; 3]))).is_none());
+    }
+
     /// Q over a slot of the inventory on a server (#3357): the predicted THROW
     /// drops the stack, so the player's hand swings, as `LivingEntity.drop`
     /// does for `Prediction.PREDICTED`; a plain pick up drops nothing.

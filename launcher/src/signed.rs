@@ -47,7 +47,7 @@ pub fn nightly_digest(
     fetch: impl Fn(&str) -> Result<Option<Vec<u8>>, String>,
 ) -> Result<String, String> {
     let sums = fetch(&asset_url(REPO, tag, SUMS))?;
-    let signature = fetch(&asset_url(REPO, tag, SIGNATURE))?
+    let signature = fetch(&asset_url(REPO, tag, SIGNATURE_V2))?
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
     horizon_release_sign::nightly_digest(
         version,

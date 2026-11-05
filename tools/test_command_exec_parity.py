@@ -39,8 +39,8 @@ except ImportError:
 SEED = 1
 
 
-def install_datapack_fixtures(world, predicates, functions, jar, advancements=None):
-    if not predicates and not functions and not advancements:
+def install_datapack_fixtures(world, predicates, functions, jar, advancements=None, loot_tables=None, recipes=None):
+    if not predicates and not functions and not advancements and not loot_tables and not recipes:
         return
     with zipfile.ZipFile(jar) as archive:
         version = json.loads(archive.read('version.json'))['pack_version']
@@ -66,6 +66,11 @@ def install_datapack_fixtures(world, predicates, functions, jar, advancements=No
         target = pack / 'data' / namespace / 'advancement' / (path + '.json')
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(advancement), encoding='utf-8')
+    for identifier, table in (loot_tables or {}).items():
+        namespace, path = identifier.split(':', 1)
+        target = pack / 'data' / namespace / 'loot_table' / (path + '.json')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(table), encoding='utf-8')
 
 
     for identifier, recipe in (recipes or {}).items():
@@ -78,6 +83,10 @@ def install_datapack_fixtures(world, predicates, functions, jar, advancements=No
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--prepare', action='store_true')
+    parser.add_argument('--advancement-loot-inline-parser-diagnostic', action='store_true',
+                        help='retain all 100 inline observations, including the three missing-reference ACK differences')
+    parser.add_argument('--advancement-loot-named-diagnostic', action='store_true',
+                        help='retain the separate named world-loot registry-admission diagnostic')
     parser.add_argument('--pot-string-sherd-diagnostic', action='store_true',
                         help='use string sherd input in the pot data group (known separate codec gap)')
     parser.add_argument('--limit', type=int, default=40, help='print at most this many mismatches')
@@ -155,6 +164,40 @@ def main():
             sys.exit(f'{name} failed ({result.returncode}):\n{tail}')
 
     groups = corpus_module.groups()
+    if not args.only:
+        groups = [(name, ops) for name, ops in groups if name not in corpus_module.ISOLATED_FRAME_MAPS]
+    if not args.only and not args.wolf_anger_clock_diagnostic:
+        groups = [(name, ops) for name, ops in groups if name not in corpus_module.ISOLATED_WOLF_ANGER]
+    if args.wolf_anger_clock_diagnostic:
+        try:
+            from .wolf_anger_corpus import groups as anger_groups
+        except ImportError:
+            from wolf_anger_corpus import groups as anger_groups
+        groups = [('setup', corpus_module.group_setup()),
+                  *anger_groups(corpus_module.cmd, corpus_module.setup, clock_diagnostic=True)]
+    isolated_reinforcements = corpus_module.ISOLATED_REINFORCEMENTS
+    if not args.only:
+        groups = [(name, ops) for name, ops in groups if name not in isolated_reinforcements]
+    if args.reinforcement_raw_diagnostic or args.reinforcement_original_diagnostic:
+        groups = [(name, corpus_module.command_zombie_reinforcements(
+            once=name == 'command reinforcement once', raw=args.reinforcement_raw_diagnostic, legacy=args.reinforcement_original_diagnostic) if name in isolated_reinforcements else ops)
+            for name, ops in groups]
+    if not args.reinforcement_target_diagnostic and not args.reinforcement_raw_diagnostic and not args.reinforcement_original_diagnostic:
+        # H300's declared208 gate excludes exactly this separate target-policy lead.
+        # --reinforcement-target-diagnostic retains full209/all30 original records.
+        groups = [(name, [op for op in ops if op.get('label') != 'h300 original/hard/callee target']
+                   if name == 'command zombie reinforcements' else ops) for name, ops in groups]
+    if args.advancement_loot_named_diagnostic and args.advancement_loot_inline_parser_diagnostic:
+        parser.error('choose only one advancement-loot diagnostic')
+    if args.advancement_loot_named_diagnostic or args.advancement_loot_inline_parser_diagnostic:
+        groups = [(name, corpus_module.advancement_world_loot_rewards(
+            named_table=args.advancement_loot_named_diagnostic, include_missing_ack=True)
+                   if name == 'advancement world loot rewards' else ops) for name, ops in groups]
+    # These overlays replace built-in recipes: run each in its own world, never
+    # beside the generic corpus's fixed vanilla recipe-count controls.
+    isolated_recipes = corpus_module.ISOLATED_RECIPES
+    if not args.only:
+        groups = [(name, ops) for name, ops in groups if name not in isolated_recipes]
     if args.loaded_fixture:
         groups = [('setup', corpus_module.group_setup()),
                   ('loaded ticket removal', corpus_module.loaded_ticket_removal(args.loaded_block_diagnostic))]
@@ -266,6 +309,15 @@ def main():
             from transmute_patch_corpus import fixture_recipes
         recipes.update(fixture_recipes())
     advancements = corpus_module.advancement_reward_fixtures([name for name, _ in groups])
+    loot_advancements, loot_tables = corpus_module.advancement_loot_fixtures([name for name, _ in groups])
+    advancements.update(loot_advancements)
+    if os.environ.get('HORIZON_FISHING_FALLBACK_FIXTURE') == '1':
+        # No random_sequence: FishingHook.retrieve must use the level stream.
+        loot_tables['minecraft:gameplay/fishing'] = {
+            'type': 'minecraft:fishing', 'pools': [{'rolls': 1, 'entries': [
+                {'type': 'minecraft:item', 'name': 'minecraft:cod', 'weight': 1},
+                {'type': 'minecraft:item', 'name': 'minecraft:salmon', 'weight': 1},
+            ]}]}
 
     if args.pufferfish_contact_fixture:
         from pufferfish_contact_corpus import advancements as contact_advancements
@@ -275,7 +327,7 @@ def main():
     vanilla_dir = build / 'vanilla'
     shutil.rmtree(vanilla_dir, ignore_errors=True)
     vanilla_dir.mkdir()
-    install_datapack_fixtures(vanilla_dir / 'universe/harness', predicates, functions, jars['server'], advancements)
+    install_datapack_fixtures(vanilla_dir / 'universe/harness', predicates, functions, jars['server'], advancements, loot_tables, recipes=recipes)
     java_options = []
     if args.orb_water_fixture:
         (build / 'orb-water-reference.json').unlink(missing_ok=True)
@@ -320,7 +372,12 @@ def main():
     rust_dir = build / 'rust'
     shutil.rmtree(rust_dir, ignore_errors=True)
     rust_dir.mkdir()
-    install_datapack_fixtures(rust_dir / 'saves/harness', predicates, functions, jars['server'], advancements)
+    install_datapack_fixtures(rust_dir / 'saves/harness', predicates, functions, jars['server'], advancements, loot_tables, recipes=recipes)
+    if any(op['op'] == 'crafter_max_map_fixture' for op in script):
+        source = vanilla_dir / 'universe/harness/data/minecraft/maps/31.dat'
+        target = rust_dir / 'saves/harness/data/minecraft/maps/31.dat'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
     # The oracle's Services resolve no profile (/fetchprofile fails on the next tick): the game gets no services
     # either, a discovery address that refuses at once, rather than Mojang's over the network.
     env = lab.game_env(HORIZON_PLAYER_NAME="Player", HORIZON_COMMAND_SCRIPT=script_path,
