@@ -19,17 +19,17 @@ use super::{
     biome_source::{BiomeSourceCatalog, ResolvedBiomeSource},
     biome_temperature::{BiomeTemperature, BiomeTemperatureSettings},
     carver::{CarverCatalog, WorldCarver, generate_carving_mask},
-    carving::{CarvingBlocks, apply_carving_mask_shared},
+    carving::{CarvingBlocks, apply_carving_mask},
     climate::{ClimateSampler, decode_parameter, quantize},
     decode_noise,
     density::DensityRegistry,
     generator_structures::Starts,
     material_condition::{
-        CompiledSurfaceRule, MaterialConditionRegistry, MaterialConditions, MaterialDensitySources,
-        MaterialRule, MaterialRuleError, MaterialRuleLibrary, MaterialSurfaceQueries,
+        MaterialConditionRegistry, MaterialConditions, MaterialDensitySources, MaterialRule,
+        MaterialRuleError, MaterialRuleLibrary, MaterialSurfaceQueries,
     },
     material_extensions::{ExtensionBlocks, ExtensionNoises, MaterialExtensions},
-    material_stage::{SurfaceInputs, TopMaterialInputs, build_surface_shared},
+    material_stage::{SurfaceInputs, TopMaterialInputs, build_surface},
     material_surface::{ClayBandBlocks, MaterialSurface},
     overrides::{self, WorldgenOverrides},
     router::{NoiseRouter, RouterField, RouterSamplers},
@@ -51,7 +51,6 @@ use horizon_core::{
 };
 use serde_json::Value;
 use std::{
-    any::Any,
     collections::{BTreeMap, BTreeSet, HashMap},
     fs, io,
     path::Path,
@@ -1036,7 +1035,7 @@ fn state(registry: &BlockRegistry, raw: &Value) -> Result<BlockStateId, Generato
     }
 }
 
-impl<R: RandomSource + 'static> Pipeline<R>
+impl<R: RandomSource> Pipeline<R>
 where
     R::Positional: Clone + Send + Sync,
 {
@@ -1708,17 +1707,10 @@ where
         .map_err(stage("noise"))?;
         let generation = self.generation();
         worker.timings.noise += lap(&mut clock);
-        // The surface rule, compiled by this worker's first chunk.
-        let mut shared = worker
-            .surface_rule
-            .take()
-            .and_then(|cache| cache.downcast::<CompiledSurfaceRule<R>>().ok())
-            .map(|cache| *cache);
         if !self.identity_end_surface(pos) {
-            build_surface_shared(
+            build_surface(
                 &mut chunk,
-                &self.rule,
-                &mut shared,
+                self.rule.clone(),
                 SurfaceInputs::<R, _> {
                     generation,
                     noise_volume: volume,
@@ -1757,11 +1749,10 @@ where
                 self.router.get(RouterField::Erosion).as_ref(),
             );
             let mut biome_context = SamplerContext::default();
-            apply_carving_mask_shared(
+            apply_carving_mask(
                 &mut chunk,
                 &mask,
-                &self.rule,
-                &mut shared,
+                self.rule.clone(),
                 TopMaterialInputs::<R, _> {
                     generation,
                     root: self.root.clone(),
@@ -1781,7 +1772,6 @@ where
             )
             .map_err(stage("carvers"))?;
         }
-        worker.surface_rule = shared.map(|rule| Box::new(rule) as Box<dyn Any + Send>);
         worker.timings.carvers += lap(&mut clock);
         chunk
             .prime_heightmaps(&[
@@ -2020,7 +2010,7 @@ where
         })
     }
 }
-impl<R: RandomSource + 'static> super::structure::start::StartContext for StructureQueries<'_, R>
+impl<R: RandomSource> super::structure::start::StartContext for StructureQueries<'_, R>
 where
     R::Positional: Clone + Send + Sync,
 {
@@ -2390,9 +2380,6 @@ pub(super) struct WorkerState {
     /// Decorate with structure pieces only (for structure parity checks).
     pub(super) structures_only: bool,
     pub(super) structure_mobs: Option<Arc<dyn StructureMobs>>,
-    /// The world's surface rule compiled once for this worker's chunks: a
-    /// `CompiledSurfaceRule` of the pipeline's random.
-    surface_rule: Option<Box<dyn Any + Send>>,
 }
 /// `Mob.finalizeSpawn(level, difficulty, STRUCTURE, null)` of the entities a
 /// structure places with finalizeEntities, run by the game, which owns mobs.
@@ -3650,7 +3637,6 @@ impl OverworldGenerator {
                 structures_only: false,
                 structure_mobs: None,
                 heights: HashMap::new(),
-                surface_rule: None,
             },
         }
     }

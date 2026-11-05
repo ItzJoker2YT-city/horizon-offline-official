@@ -3,15 +3,15 @@ use super::*;
 use crate::{gfx::Frame, hud::HudBatch};
 use wgpu::{TextureFormat as T, util::DeviceExt};
 
-pub(super) const SIZE: [u32; 2] = [16, 16];
+const SIZE: [u32; 2] = [16, 16];
 
-pub(super) struct Gpu {
+struct Gpu {
     adapter: wgpu::Adapter,
-    pub(super) device: wgpu::Device,
+    device: wgpu::Device,
     queue: wgpu::Queue,
 }
 impl Gpu {
-    pub(super) fn new() -> Option<Self> {
+    fn new() -> Option<Self> {
         let instance = crate::gfx::test_gpu::instance();
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -27,7 +27,7 @@ impl Gpu {
             queue,
         })
     }
-    pub(super) fn texture(&self, format: T) -> wgpu::TextureView {
+    fn texture(&self, format: T) -> wgpu::TextureView {
         self.device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("Original depth fixture input"),
@@ -47,7 +47,7 @@ impl Gpu {
             })
             .create_view(&Default::default())
     }
-    pub(super) fn load(
+    fn load(
         &self,
         files: Vec<(String, String)>,
         world: World<'_>,
@@ -122,7 +122,7 @@ impl Gpu {
         });
         self.queue.submit([encoder.finish()]);
     }
-    pub(super) fn render(
+    fn render(
         &self,
         post: &mut PackPost,
         color: &wgpu::TextureView,
@@ -213,7 +213,7 @@ enum Scene {
     WaterOnly,
 }
 
-pub(super) const VERTEX: &str =
+const VERTEX: &str =
     "#version 120\nvarying vec2 uv;void main(){uv=gl_MultiTexCoord0.xy;gl_Position=ftransform();}";
 
 fn shaders(sampler: &str, stage: Stage, scene: Scene) -> Vec<(String, String)> {
@@ -561,7 +561,7 @@ fn attached_compute_preserves_distinct_hand_snapshots() {
 }
 
 // Frame literal adapted from MIT Horizon f700231 pack_uniforms.rs test API setup.
-pub(super) fn fixture_frame(hud: &HudBatch) -> Frame<'_> {
+fn fixture_frame(hud: &HudBatch) -> Frame<'_> {
     Frame {
         eye: glam::DVec3::ZERO,
         eye_rotation: [0.0; 2],

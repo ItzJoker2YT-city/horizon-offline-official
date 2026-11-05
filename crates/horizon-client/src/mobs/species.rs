@@ -1485,10 +1485,7 @@ impl Def {
                     | S::ZombieNautilus
             ),
             undead,
-            // `#can_breathe_under_water`, and the iron golem, whose
-            // `decreaseAirSupply` keeps its air. Not the dolphin: it holds its
-            // breath (4800 ticks) and surfaces for air.
-            breathes_water: (aquatic && s != S::Dolphin)
+            breathes_water: aquatic
                 || undead
                 || matches!(
                     s,
@@ -1498,13 +1495,13 @@ impl Def {
                         | S::Guardian
                         | S::ElderGuardian
                         | S::IronGolem
-                        | S::CopperGolem
+                        | S::SnowGolem
+                        | S::Ghast
+                        | S::Blaze
                         | S::Nautilus
                 ),
-            // WaterAnimal.handleAirSupply: it dries out on land; Nautilus's
-            // does the same. Dolphin.handleAirSupply is empty, so a dolphin
-            // takes LivingEntity.baseTick's air like a land mob.
-            needs_water: (aquatic && s != S::Dolphin) || s == S::Nautilus,
+            // Nautilus.handleAirSupply: it dries out on land.
+            needs_water: aquatic || s == S::Nautilus,
             water_sensitive: matches!(s, S::Enderman | S::Blaze | S::SnowGolem | S::Strider),
             animal: !matches!(s, S::Bat | S::SulfurCube | S::Mannequin)
                 && !self.hostile_class()
