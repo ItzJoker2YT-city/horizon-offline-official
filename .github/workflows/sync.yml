@@ -1,0 +1,153 @@
+name: sync
+# Mirrors every official Horizon launcher release here with the offline patch on
+# top. Every half hour a watcher compares the official repository's newest
+# `launcher@` tag against this repository's; when the official one is newer:
+#
+#   1. the watch job emits the official version,
+#   2. sync-source checks out that tag's sources, cherry-picks everything after
+#      PATCH_SHA on main (the offline patch and every offline change) onto them
+#      with our hunks winning (`-X theirs`), restores our CI files and our
+#      release-keys.txt line, commits the result to main and pushes its tag,
+#   3. publish calls build.yml to build, sign and release that tag here.
+#
+# The launcher's self-update feed reads this repository (LAUNCHER_UPDATES_REPO
+# in launcher/src/backend.rs), so its own Update button offers these patched
+# builds and thereby keeps the offline patch — while game versions, downloads
+# and Nightlies keep coming from the official repository as before.
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+env:
+  OFFICIAL_REPO: horizon-rust/horizon
+  # The commit after which main is "the offline flavor": the last commit that
+  # only carries sources we merged from official (never amend it). Everything
+  # after it — the patch itself, the self-update redirect, later offline work —
+  # is what each sync re-applies onto the official tree.
+  PATCH_SHA: ef517b80b8d58d3131ad0f879bf62f737ac600ee
+  # This repository's release key (crates/horizon-release-sign/release-keys.txt
+  # line): a synced launcher must trust it to self-update.
+  OFFLINE_KEY: KryjxUnsgyWi5jwJp1jnryYqLNCjyi8X/gyuVFW82FI=
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      version: ${{ steps.compare.outputs.version }}
+    steps:
+      - name: Official's newest launcher tag vs. ours
+        id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          official=$(gh api "repos/$OFFICIAL_REPO/git/matching-refs/tags/launcher@?per_page=100" --paginate \
+            --jq '.[].ref' | sed 's|^refs/tags/launcher@||' | sort -V | tail -n1)
+          if ! grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' <<< "$official"; then
+            echo "official repository has no usable launcher@ tag ('$official'); nothing to do"
+            exit 0
+          fi
+          ours=$(git ls-remote --tags "https://github.com/$GITHUB_REPOSITORY" 'refs/tags/launcher@*' \
+            | sed 's|.*refs/tags/launcher@||; s/\^.*$//' | sort -V | tail -n1)
+          # A synced tag without a release (a failed build) is still worth a retry:
+          # only when ours is uo to date AND its release exists is there nothing to do.
+          if [ "$official" = "$ours" ]; then
+            if gh release view "launcher@$official" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+              echo "up to date: launcher@$official exists here; nothing to do"
+              exit 0
+            fi
+            echo "tag launcher@$official exists without a release; retrying its build"
+            echo "version=$official" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          newest=$(printf '%s\n%s\n' "$official" "$ours" | sort -V | tail -n1)
+          if [ "$newest" != "$official" ]; then
+            echo "up to date: ours ($ours) is not older than official ($official); nothing to do"
+            exit 0
+          fi
+          echo "official launcher@$official is newer than ours (${ours:-none}): syncing"
+          echo "version=$official" >> "$GITHUB_OUTPUT"
+
+  sync-source:
+    needs: watch
+    if: needs.watch.outputs.version != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history: the offline flavor is cherry-picked with each commit's
+          # parent along, and the push reuses our history instead of growing a new one.
+          fetch-depth: 0
+      - name: The official sources with the offline patch re-applied
+        env:
+          VERSION: ${{ needs.watch.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' <<< "$VERSION"; then
+            echo "refusing a non-semver launcher version: '$VERSION'" >&2
+            exit 1
+          fi
+          tag="launcher@$VERSION"
+          git fetch origin --tags
+          # A retried build (the tag exists, its sync commit is on main): the sources
+          # need nothing new — only the release below runs again.
+          if git cat-file -e "refs/tags/$tag" 2>/dev/null &&
+             git merge-base --is-ancestor "refs/tags/$tag" main &&
+             [ "$(git log -1 --format=%s "refs/tags/$tag")" = "Sync: official launcher@$VERSION with the offline patch re-applied" ]; then
+            echo "sources already contain $tag; only its release runs again"
+            exit 0
+          fi
+          git config user.name "offline-sync[bot]"
+          git config user.email "offline-sync[bot]@users.noreply.github.com"
+          git fetch --depth 1 "https://github.com/$OFFICIAL_REPO" "refs/tags/$tag:refs/tags/official-$VERSION"
+          git checkout --detach "refs/tags/official-$VERSION"
+          # The whole offline flavor rides along: everything after PATCH_SHA on
+          # main. `-X theirs` = where our hunks and upstream's disagree, ours win
+          # (the patch: things it deletes or changes stay deleted or changed).
+          git cherry-pick -n -X theirs "$PATCH_SHA..main"
+          # Our CI files, not the official tag's: sync builds only ever run ours.
+          rm -rf .github
+          git checkout main -- .github
+          # The launcher inside the synced sources must trust this repository's
+          # key to self-update: the official tag's list with our line appended.
+          git checkout "refs/tags/official-$VERSION" -- crates/horizon-release-sign/release-keys.txt
+          grep -qF "$OFFLINE_KEY" crates/horizon-release-sign/release-keys.txt || cat >> crates/horizon-release-sign/release-keys.txt <<KEYS
+          # OFFLINE: the offline launcher's own key (ItzJoker2YT-city/horizon-offline-official), signs this repo's launcher releases.
+          $OFFLINE_KEY
+          KEYS
+          git add -A
+          git reset --soft main
+          git commit -m "Sync: official launcher@$VERSION with the offline patch re-applied"
+          git push origin HEAD:main
+          git tag "$tag"
+          git push origin "refs/tags/$tag"
+
+  publish:
+    needs: [watch, sync-source]
+    if: needs.watch.outputs.version != ''
+    uses: ./.github/workflows/build.yml
+    permissions:
+      contents: write
+    with:
+      version: launcher@${{ needs.watch.outputs.version }}
+      checkout_ref: launcher@${{ needs.watch.outputs.version }}
+      do_release: true
+    secrets: inherit

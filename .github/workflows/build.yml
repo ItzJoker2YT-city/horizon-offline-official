@@ -1,0 +1,213 @@
+name: build
+# Reusable: builds the offline-patched Horizon launcher for Windows x64 and
+# Linux x86_64, and — when `do_release` is set — signs the assets and publishes
+# the GitHub Release. Called by release.yml (tag pushes, manual artifact builds)
+# and by sync.yml (a new official launcher release with the patch re-applied).
+#
+# The patched sources build exactly like Horizon's own release workflow does
+# (launcher.yml upstream): --release --locked, the C runtime linked in on
+# Windows, the version and tag given to the build via HORIZON_LAUNCHER_VERSION
+# and HORIZON_LAUNCHER_TAG.
+#
+# Inputs:
+#   version      The `launcher@<version>` tag to build and release as (required).
+#   do_release   Also sign and publish the release (default: false).
+#   checkout_ref The git ref to build from (default: `version`, i.e. the tag).
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The `launcher@<version>` tag to build (and release) as
+        required: true
+        type: string
+      do_release:
+        description: Sign the assets and publish the release
+        required: false
+        type: boolean
+        default: false
+      checkout_ref:
+        description: The git ref to check out (defaults to `version`)
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  # Test builds never reach the telemetry server.
+  HORIZON_TELEMETRY_URL: "off"
+
+jobs:
+  build:
+    name: build ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            asset: horizon-launcher-windows-x64.zip
+            binary: horizon-launcher.exe
+            setup_asset: horizon-launcher-setup.exe
+            # The C runtime linked in: without it the launcher asks for VCRUNTIME140.dll,
+            # which only the Visual C++ redistributable installs.
+            rustflags: -C target-feature=+crt-static
+          - name: linux-x64
+            os: ubuntu-22.04
+            asset: horizon-launcher-linux-x86_64.tar.gz
+            binary: horizon-launcher
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+      # Where cargo puts the binary: always target/release (no cross targets here).
+      BIN: target/release
+    defaults:
+      run:
+        working-directory: launcher
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # A sync builds the just-pushed sources instead of the caller run's commit.
+          ref: ${{ inputs.checkout_ref || inputs.version }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: launcher
+          shared-key: launcher-${{ matrix.name }}
+      - name: Linux libraries GPUI links to
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev patchelf
+      - name: The launcher version (the `launcher@` tag)
+        run: |
+          version="${{ inputs.version }}"
+          if ! grep -qE '^launcher@[0-9]+\.[0-9]+\.[0-9]+$' <<< "$version"; then
+            echo "::error:not a launcher@<semver> tag: '$(printf '%s' "$version" | head -c 120)'"
+            exit 1
+          fi
+          version="${version#launcher@}"
+          echo "HORIZON_LAUNCHER_VERSION=$version" >> "$GITHUB_ENV"
+          echo "HORIZON_LAUNCHER_TAG=launcher@$version" >> "$GITHUB_ENV"
+      - run: cargo build --release --locked
+      - name: The version is the release's
+        run: |
+          "$BIN/${{ matrix.binary }}" --version
+      - name: The release feed of the official repository parses
+        # Warning only: a hiccup of GitHub's API must not fail an otherwise good build.
+        env:
+          HORIZON_LAUNCHER_NO_SELF_UPDATE: '1'
+        run: |
+          "$BIN/${{ matrix.binary }}" versions || echo "::warning:the feed check failed (GitHub API hiccup?)"
+      - name: Package
+        run: |
+          rm -rf dist out && mkdir -p dist out
+          cp "$BIN/${{ matrix.binary }}" dist/
+          # The legal files ride along in every archive.
+          cp ../LICENSE ../THIRD_PARTY_NOTICES.md ../NOTICE.txt dist/
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            tar czf out/${{ matrix.asset }} -C dist .
+          else
+            (cd dist && 7z a ../out/${{ matrix.asset }} . > /dev/null)
+            # The same binary under the setup's name shows the per-user installer
+            # (launcher/src/installer.rs) instead of Home: no arguments needed.
+            cp "$BIN/${{ matrix.binary }}" out/${{ matrix.setup_asset }}
+          fi
+          ls -l out
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset }}
+          path: launcher/out/*
+          retention-days: 7
+
+  release:
+    needs: build
+    if: inputs.do_release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # For the signing/verify tools (tools/ci/sign_release.sh, horizon-release-sign):
+          # the artifacts carry everything else, so a bare checkout without a build is enough.
+          ref: ${{ inputs.checkout_ref || inputs.version }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Sign the release (SHA256SUMS + SHA256SUMS.sig)
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.OFFLINE_RELEASE_SIGNING_KEY }}
+          TAG: ${{ inputs.version }}
+        run: |
+          bash tools/ci/sign_release.sh "$TAG" \
+            dist/horizon-launcher-windows-x64.zip \
+            dist/horizon-launcher-setup.exe \
+            dist/horizon-launcher-linux-x86_64.tar.gz
+      - name: Verify like the launcher would
+        env:
+          TAG: ${{ inputs.version }}
+        run: |
+          cargo run --locked -p horizon-release-sign -- verify --tag "$TAG" --publishing dist
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.version }}
+        run: |
+          version="${TAG#launcher@}"
+          cat > notes.md <<BODY
+          ## Horizon Offline Launcher $version
+
+          The official [Horizon launcher](https://github.com/horizon-rust/horizon) (synced
+          from its \`launcher@$version\` sources automatically) with the offline patch on
+          top: it plays **without a Microsoft account**. Game versions, downloads and
+          signatures still come from Horizon's own releases — nothing about the game
+          itself is patched.
+
+          ### Downloads
+          - **Windows:** \`horizon-launcher-windows-x64.zip\` (portable), or
+            \`horizon-launcher-setup.exe\` (the same launcher as a per-user installer).
+          - **Linux:** \`horizon-launcher-linux-x86_64.tar.gz\`.
+
+          ### Updates keep the patch
+          This launcher updates **itself** from this repository: clicking Update installs
+          the offline-patched build again, never the official one. Game updates and
+          Nightlies are unaffected and stay official. (Only the plain 0.2.41 install still
+          read the official feed: install 0.2.42 manually once to switch.) The
+          \`HORIZON_LAUNCHER_NO_SELF_UPDATE=1\` environment variable now only means
+          "never update myself" — it is no longer needed to keep the patch.
+
+          ### Checksums
+          \`SHA256SUMS\` lists every archive's SHA-256; \`SHA256SUMS.sig\` is its
+          Ed25519 signature. The launcher verifies it before installing.
+
+          Offline names, existing Horizon data folders and linked installs (a Minecraft
+          client jar from any launcher) all keep working: the same data folder as the
+          official launcher is used.
+
+          ### Credits
+          [Horizon](https://github.com/horizon-rust/horizon) (MIT) — the launcher itself;
+          [gerdaroot/Horizon-Offline-Launcher](https://github.com/gerdaroot/Horizon-Offline-Launcher)
+          — the offline patch this build re-applies onto the official sources. Not
+          affiliated with Mojang or Microsoft.
+          BODY
+          gh release view "$TAG" --json assets --jq . > /dev/null 2>&1 && echo "release $TAG already exists" || {
+            gh release create "$TAG" --title "Horizon Offline Launcher $version" \
+              --notes-file notes.md dist/horizon-launcher-* dist/SHA256SUMS dist/SHA256SUMS.sig
+          }
+          ls -l dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: notes.md
+          retention-days: 7

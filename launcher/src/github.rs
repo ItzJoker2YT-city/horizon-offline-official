@@ -120,8 +120,12 @@ pub(crate) fn mirror_url(url: &str) -> Option<String> {
 
 fn mirror_url_with(url: &str, base: &str) -> Option<String> {
     let path = url.strip_prefix(API)?;
+    // OFFLINE: this launcher's own repository is read through the mirror too (its releases serve
+    // the self-updates). A mirror that doesn't carry it refuses with a 404, which the read treats
+    // like any failed mirror: the saved copy and GitHub itself still serve the answer.
     let repo = format!("/repos/{}/", backend::REPO);
-    (!base.is_empty() && path.starts_with(&repo))
+    let offline = format!("/repos/{}/", backend::LAUNCHER_UPDATES_REPO);
+    (!base.is_empty() && (path.starts_with(&repo) || path.starts_with(&offline)))
         .then(|| format!("{}{path}", base.trim_end_matches('/')))
 }
 

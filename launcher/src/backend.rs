@@ -11,6 +11,11 @@ use std::sync::{Arc, Mutex};
 
 pub const REPO: &str = "horizon-rust/horizon";
 pub const README_URL: &str = "https://github.com/horizon-rust/horizon/blob/main/launcher/README.md";
+/// OFFLINE: the repository this launcher updates ITSELF from — this project's own releases, so an
+/// update keeps the offline patch (Horizon's own release replaces this build with the official
+/// launcher, whose account gate is what the offline patch removes). Game versions and every other
+/// read still come from [`REPO`].
+pub const LAUNCHER_UPDATES_REPO: &str = "ItzJoker2YT-city/horizon-offline-official";
 /// The players' page on connecting an AI agent (the website's docs/agents.md).
 pub const AGENT_DOCS_URL: &str = "https://playhorizon.dev/docs/agents";
 /// This launcher's version: the release workflow sets `HORIZON_LAUNCHER_VERSION` from the
@@ -779,8 +784,16 @@ fn game_releases_with(
 /// a day, so the newest launcher release can be older than all of those: then the newest
 /// `launcher@` and `launcher-v` tags are looked up one by one (a draft's tag is skipped: it has no
 /// public release).
-fn launcher_releases_in(list: &serde_json::Value) -> Vec<Release> {
-    launcher_releases_in_with(list, |url| crate::github::json(&url))
+/// OFFLINE: the launcher-update feed ignores the game list (Horizon's repo) and reads this
+/// project's own releases instead, so every update this launcher offers keeps the offline
+/// patch ([`LAUNCHER_UPDATES_REPO`]).
+fn launcher_releases_in(_list: &serde_json::Value) -> Vec<Release> {
+    let list = crate::github::json(&format!(
+        "https://api.github.com/repos/{LAUNCHER_UPDATES_REPO}/releases?per_page=100"
+    ));
+    launcher_releases_in_with(&list.unwrap_or_else(|_| serde_json::json!([])), |url| {
+        crate::github::json(&url)
+    })
 }
 
 fn launcher_releases_in_with(
@@ -791,7 +804,8 @@ fn launcher_releases_in_with(
     if found.iter().any(|r| r.asset.is_some()) {
         return found;
     }
-    let api = format!("https://api.github.com/repos/{REPO}");
+    // OFFLINE: the fallback hunt for a launcher release also happens here, not on Horizon's repo.
+    let api = format!("https://api.github.com/repos/{LAUNCHER_UPDATES_REPO}");
     let mut tags = Vec::new();
     for prefix in [LAUNCHER_TAG_PREFIX, OLD_LAUNCHER_TAG_PREFIX] {
         // Every `launcher@` tag is newer than every `launcher-v` one: those only when there is none.
@@ -1103,8 +1117,11 @@ pub(crate) fn fetch_small(url: &str) -> Result<Option<Vec<u8>>, String> {
 }
 
 /// The SHA-256 the release's signed checksums give for `asset`, or why it must not be installed.
-fn signed_digest(tag: &str, asset: &str) -> Result<String, String> {
+/// OFFLINE: `repo` says which repository serves the release — the game's releases from [`REPO`],
+/// a launcher update from [`LAUNCHER_UPDATES_REPO`] — where its SHA256SUMS and SHA256SUMS.sig sit.
+fn signed_digest(repo: &str, tag: &str, asset: &str) -> Result<String, String> {
     crate::signed::digest(
+        repo,
         tag,
         asset,
         &horizon_release_sign::trusted_keys(),
@@ -1222,7 +1239,7 @@ pub fn install(release: &Release, progress: impl Fn(f32)) -> Result<(), String> 
             &horizon_release_sign::trusted_keys(),
             fetch_small,
         )?,
-        None if is_game_tag(tag) => signed_digest(tag, asset)?,
+        None if is_game_tag(tag) => signed_digest(REPO, tag, asset)?,
         None => return Err(format!("{tag} is not a Horizon release.")),
     };
     install_as(
@@ -3730,7 +3747,11 @@ pub fn stage_update(release: &Release, progress: impl Fn(f32)) -> Result<Option<
     {
         return Ok(None);
     }
-    let sha256 = signed_digest(&release.tag, launcher_asset().unwrap_or_default())?;
+    let sha256 = signed_digest(
+        LAUNCHER_UPDATES_REPO,
+        &release.tag,
+        launcher_asset().unwrap_or_default(),
+    )?;
     let work = update_work_dir();
     remove_abandoned_stages(&work, std::time::SystemTime::now(), process_alive);
     let stage = new_stage_folder(&work)?;

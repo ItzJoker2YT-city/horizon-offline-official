@@ -1,10 +1,11 @@
 # Horizon Offline Launcher (unofficial)
 
 The **official [Horizon launcher](https://github.com/horizon-rust/horizon)** with one small
-patch: it plays **without a Microsoft account**. Everything else stays official —
-game versions are downloaded from Horizon's own signed releases, launcher sources come
-from upstream `main`, and GitHub Actions builds the binary the same way Horizon's release
-workflow does.
+patch: it plays **without a Microsoft account**. Everything else stays official — game
+versions are downloaded from Horizon's own signed releases, and GitHub Actions builds the
+binary the same way Horizon's release workflow does. When Horizon ships a new launcher
+release, an automated workflow here re-applies the patch onto its sources, builds and
+publishes the matching offline release, and this launcher updates itself to it.
 
 You can play with an offline name, with a Minecraft client jar linked from any launcher
 (the official launcher, Prism, Modrinth App, SKLauncher, …), or with a folder from one.
@@ -21,25 +22,31 @@ Get the newest Release:
 
 `SHA256SUMS` lists every file's sha256.
 
-## Keep the patch (important)
+## Updates (the patch keeps itself)
 
-The launcher checks the **official** Horizon repository for launcher updates. Until you disable
-that, a new official release can replace this build — and bring the account gate back.
-Set the no-self-update switch once:
-
-**Windows:** `setx HORIZON_LAUNCHER_NO_SELF_UPDATE 1` (then restart the launcher)
-
-**Linux:** put `export HORIZON_LAUNCHER_NO_SELF_UPDATE=1` in your shell profile.
+From 0.2.42 on, the launcher updates **itself from this repository**: clicking Update
+installs the offline-patched build again, never the official one. An automated workflow
+watches the official Horizon repository every 30 minutes, re-applies the offline patch to
+each new `launcher@` release, builds it with Actions, signs it, and publishes it here.
 
 Game updates (new Horizon Nightlies and releases of the game) are unaffected: they keep
-coming from the official repository and are installed as usual.
+coming from Horizon's own repository, checked against Horizon's signatures as before.
+
+Only an install of the plain 0.2.41 (or of the official launcher itself) still reads the
+official feed: install 0.2.42 here manually once to switch. `HORIZON_LAUNCHER_NO_SELF_UPDATE=1`
+still works — since 0.2.42 it just means "never update myself at all".
 
 ## Building
 
-`.github/workflows/release.yml` builds on GitHub Actions — `cargo build --release --locked`
+`.github/workflows/build.yml` builds on GitHub Actions — `cargo build --release --locked`
 in `launcher/`, with the version and tag handed to the build (`HORIZON_LAUNCHER_VERSION`,
-`HORIZON_LAUNCHER_TAG`). A push of a `launcher@<version>` tag builds and publishes a Release;
-* Releases → workflow run (artifacts, no release).
+`HORIZON_LAUNCHER_TAG`) — and, when asked to, signs the assets and publishes the Release:
+
+- `release.yml`: a push of a `launcher@<version>` tag builds and publishes that Release;
+  *Actions → release → Run workflow* builds only (artifacts, no release).
+- `sync.yml`: every 30 minutes it checks the official repository for a new `launcher@`
+  release; when found, it re-applies the offline patch onto its sources, pushes them and
+  the tag here, and publishes the signed release — that is how new versions arrive.
 
 ### What the patch changes (and does not)
 
@@ -53,12 +60,17 @@ Changes on top of upstream `main` (three-way merged, patch extracted from
   install or a chosen client jar (`Settings.minecraft_jar`).
 - `sources.rs`: prepare a version from a client jar file (`from_jar`), sha1-pinned.
 - `cli.rs`: `--minecraft-jar` setting and the jar wording in `play/prepare`.
+- `backend.rs`/`signed.rs`/`github.rs`: the launcher's self-update feed reads this
+  repository (`LAUNCHER_UPDATES_REPO`) instead of Horizon's, while game versions, downloads
+  and Nightlies stay on `horizon-rust/horizon`. Releases here are signed the official way
+  (`SHA256SUMS` + `SHA256SUMS.sig`) with this project's own key, appended to
+  `crates/horizon-release-sign/release-keys.txt` next to Horizon's.
 - 10 languages gained the offline strings; the README fork redirects, fork tag hacks
   and fork signing were **not** taken.
 
-Not taken from the fork: its own release repository/signing key (game and launcher
-downloads stay on `horizon-rust/horizon`), its 4-part version ordering, and its
-self-update tweaks.
+Not taken from the fork: its 4-part version ordering and its own release-repository
+tweaks beyond the update redirect (game downloads stay on `horizon-rust/horizon`; release
+signing is Horizon's mechanism with one extra key for this repository's releases).
 
 ## License
 
