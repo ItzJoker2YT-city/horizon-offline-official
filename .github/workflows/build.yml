@@ -1,18 +1,19 @@
 name: build
-# Reusable: builds the offline-patched Horizon launcher for Windows x64 and
-# Linux x86_64, and — when `do_release` is set — signs the assets and publishes
-# the GitHub Release. Called by release.yml (tag pushes, manual artifact builds)
-# and by sync.yml (a new official launcher release with the patch re-applied).
+# Reusable: builds the offline-patched Horizon launcher for Linux x86_64 (tar.gz and AppImage),
+# macOS arm64 and x64 (zip and .dmg), Windows x64 and ARM64 (zip and setup exe each), and — when
+# `do_release` is set — signs the assets and publishes the GitHub Release. Called by release.yml
+# (tag pushes, manual artifact builds) and by sync.yml (a new official launcher release with the
+# patch re-applied).
 #
-# The patched sources build exactly like Horizon's own release workflow does
-# (launcher.yml upstream): --release --locked, the C runtime linked in on
-# Windows, the version and tag given to the build via HORIZON_LAUNCHER_VERSION
-# and HORIZON_LAUNCHER_TAG.
+# The patched sources build exactly like Horizon's own release workflow does (launcher.yml
+# upstream): --release --locked, the C runtime linked in on Windows, the version and tag given to
+# the build via HORIZON_LAUNCHER_VERSION and HORIZON_LAUNCHER_TAG, and the packaging their
+# packaging/linux and packaging/macos scripts do (this repository carries those, unchanged).
 #
 # Inputs:
 #   version      The `launcher@<version>` tag to build and release as (required).
 #   do_release   Also sign and publish the release (default: false).
-#   checkout_ref The git ref to build from (default: `version`, i.e. the tag).
+#   checkout_ref The git ref to check out (default: `version`, i.e. the tag).
 
 on:
   workflow_call:
@@ -42,28 +43,56 @@ env:
 jobs:
   build:
     name: build ${{ matrix.name }}
+    # Windows ARM64 is new: its failure never holds the other platforms' release. The release
+    # steps leave the missing ARM64 files out with a warning (the launcher then installs an
+    # older one: backend.rs, launcher_update_from).
+    continue-on-error: ${{ matrix.name == 'windows-arm64' }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: windows-x64
-            os: windows-latest
-            asset: horizon-launcher-windows-x64.zip
-            binary: horizon-launcher.exe
-            setup_asset: horizon-launcher-setup.exe
-            # The C runtime linked in: without it the launcher asks for VCRUNTIME140.dll,
-            # which only the Visual C++ redistributable installs.
-            rustflags: -C target-feature=+crt-static
           - name: linux-x64
             os: ubuntu-22.04
             asset: horizon-launcher-linux-x86_64.tar.gz
             binary: horizon-launcher
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+          - name: macos
+            mac: true
+            asset: horizon-launcher-macos-arm64.zip
+            binary: horizon-launcher
+            mac_arch: arm64
+          - name: macos-x64
+            mac: true
+            target: x86_64-apple-darwin
+            asset: horizon-launcher-macos-x64.zip
+            binary: horizon-launcher
+            mac_arch: x64
+          - name: windows-x64
+            os: windows-latest
+            asset: horizon-launcher-windows-x64.zip
+            binary: horizon-launcher.exe
+            pe_arch: x64
+            setup_asset: horizon-launcher-setup.exe
+            # The C runtime linked in: without it the launcher asks for VCRUNTIME140.dll,
+            # which only the Visual C++ redistributable installs.
+            rustflags: -C target-feature=+crt-static
+          - name: windows-arm64
+            os: windows-11-vs2026-arm
+            target: aarch64-pc-windows-msvc
+            asset: horizon-launcher-windows-arm64.zip
+            binary: horizon-launcher.exe
+            pe_arch: arm64
+            setup_asset: horizon-launcher-setup-arm64.exe
+            # The C runtime linked in, so the standalone ARM64 launcher needs no redistributable.
+            rustflags: -C target-feature=+crt-static
+    # macOS: a GitHub-hosted runner (macos-latest) unless a repository variable MAC_RUNNER says
+    # otherwise; Intel is cross-built for x86_64-apple-darwin on the same runner.
+    runs-on: ${{ matrix.mac && (vars.MAC_RUNNER || 'macos-latest') || matrix.os }}
+    timeout-minutes: ${{ matrix.mac && 60 || 90 }}
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
-      # Where cargo puts the binary: always target/release (no cross targets here).
-      BIN: target/release
+      # Where cargo puts the launcher: target/release, or target/<target>/release when built
+      # for another target (Intel Mac, Windows ARM64).
+      BIN: ${{ matrix.target && format('target/{0}/release', matrix.target) || 'target/release' }}
     defaults:
       run:
         working-directory: launcher
@@ -75,6 +104,8 @@ jobs:
           ref: ${{ inputs.checkout_ref || inputs.version }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: launcher
@@ -84,6 +115,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev patchelf
+      - name: Metal shaders compiled now, or at run time without the Metal toolchain
+        # GPUI compiles its Metal shaders when it builds; a runner without the Metal toolchain
+        # (xcodebuild -downloadComponent MetalToolchain) gets them compiled when the launcher
+        # starts, through gpui_platform/runtime_shaders.
+        if: runner.os == 'macOS'
+        run: |
+          if ! xcrun metal --version > /dev/null 2>&1; then
+            echo "::notice::No Metal toolchain on this runner: GPUI compiles its shaders at run time"
+            echo "LAUNCHER_FEATURES=gpui_platform/runtime_shaders" >> "$GITHUB_ENV"
+          fi
       - name: The launcher version (the `launcher@` tag)
         run: |
           version="${{ inputs.version }}"
@@ -94,11 +135,14 @@ jobs:
           version="${version#launcher@}"
           echo "HORIZON_LAUNCHER_VERSION=$version" >> "$GITHUB_ENV"
           echo "HORIZON_LAUNCHER_TAG=launcher@$version" >> "$GITHUB_ENV"
-      - run: cargo build --release --locked
+      - run: cargo build --release --locked ${{ matrix.target && format('--target {0}', matrix.target) || '' }} ${LAUNCHER_FEATURES:+--features "$LAUNCHER_FEATURES"}
+      - name: Verify Windows executable architecture
+        if: runner.os == 'Windows'
+        run: python ../tools/check_pe_arch.py "${{ matrix.pe_arch }}" "$BIN/${{ matrix.binary }}"
       - name: The version is the release's
         run: |
           "$BIN/${{ matrix.binary }}" --version
-      - name: The release feed of the official repository parses
+      - name: The release feed the launcher self-updates from parses
         # Warning only: a hiccup of GitHub's API must not fail an otherwise good build.
         env:
           HORIZON_LAUNCHER_NO_SELF_UPDATE: '1'
@@ -107,18 +151,38 @@ jobs:
       - name: Package
         run: |
           rm -rf dist out && mkdir -p dist out
-          cp "$BIN/${{ matrix.binary }}" dist/
-          # The legal files ride along in every archive.
-          cp ../LICENSE ../THIRD_PARTY_NOTICES.md ../NOTICE.txt dist/
-          if [[ "$RUNNER_OS" == "Linux" ]]; then
-            tar czf out/${{ matrix.asset }} -C dist .
+          version="$HORIZON_LAUNCHER_VERSION"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            # Horizon.app, zipped (self-update) and in a .dmg (installer), signed ad hoc (no
+            # Apple identity in this repository): packaging/macos.
+            python3 -m venv "$RUNNER_TEMP/dmg" && "$RUNNER_TEMP/dmg/bin/pip" install --quiet dmgbuild==1.6.5
+            DMGBUILD="$RUNNER_TEMP/dmg/bin/dmgbuild" ../packaging/macos/package.sh \
+              "$BIN/${{ matrix.binary }}" "$version" out ${{ matrix.mac_arch }}
+            rm -rf out/Horizon.app
           else
-            (cd dist && 7z a ../out/${{ matrix.asset }} . > /dev/null)
-            # The same binary under the setup's name shows the per-user installer
-            # (launcher/src/installer.rs) instead of Home: no arguments needed.
-            cp "$BIN/${{ matrix.binary }}" out/${{ matrix.setup_asset }}
+            if [[ "$RUNNER_OS" == "Linux" ]]; then
+              # The .tar.gz below is what the launcher updates itself from; the AppImage is what
+              # a player downloads and double-clicks, and it replaces itself instead
+              # (packaging/linux/appimage.sh, launcher/src/backend.rs).
+              ../packaging/linux/appimage.sh "$BIN/${{ matrix.binary }}" "$version" out
+            fi
+            cp "$BIN/${{ matrix.binary }}" dist/
+            # The legal files ride along in every archive.
+            cp ../LICENSE ../THIRD_PARTY_NOTICES.md ../NOTICE.txt dist/
+            if [[ "${{ matrix.asset }}" == *.tar.gz ]]; then
+              (cd dist && tar czf ../out/${{ matrix.asset }} .)
+            else
+              (cd dist && 7z a ../out/${{ matrix.asset }} . > /dev/null)
+            fi
           fi
           ls -l out
+      - name: Setup exe (Windows)
+        # The launcher's binary under another name: started with no arguments it shows the
+        # per-user installer instead of Home (launcher/src/installer.rs). Its name is what makes
+        # it the setup, so the ZIP's copy stays the launcher. Both go into the release's signed
+        # SHA256SUMS.
+        if: runner.os == 'Windows'
+        run: cp "$BIN/${{ matrix.binary }}" "out/${{ matrix.setup_asset }}"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset }}
@@ -144,15 +208,19 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: The Windows ARM64 launcher, if it built
+        # Its build may fail without holding the release (continue-on-error): the release then
+        # has no ARM64 files, and ARM64 launchers stay on their version until one has.
+        run: |
+          for file in horizon-launcher-windows-arm64.zip horizon-launcher-setup-arm64.exe; do
+            [[ -f "dist/$file" ]] || echo "::warning::$file is missing: this release goes out without it"
+          done
       - name: Sign the release (SHA256SUMS + SHA256SUMS.sig)
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.OFFLINE_RELEASE_SIGNING_KEY }}
           TAG: ${{ inputs.version }}
         run: |
-          bash tools/ci/sign_release.sh "$TAG" \
-            dist/horizon-launcher-windows-x64.zip \
-            dist/horizon-launcher-setup.exe \
-            dist/horizon-launcher-linux-x86_64.tar.gz
+          bash tools/ci/sign_release.sh "$TAG" dist/horizon-launcher-*
       - name: Verify like the launcher would
         env:
           TAG: ${{ inputs.version }}
@@ -175,9 +243,16 @@ jobs:
           itself is patched.
 
           ### Downloads
-          - **Windows:** \`horizon-launcher-windows-x64.zip\` (portable), or
+          - **Windows x64:** \`horizon-launcher-windows-x64.zip\` (portable), or
             \`horizon-launcher-setup.exe\` (the same launcher as a per-user installer).
-          - **Linux:** \`horizon-launcher-linux-x86_64.tar.gz\`.
+          - **Windows ARM64:** \`horizon-launcher-windows-arm64.zip\`, or
+            \`horizon-launcher-setup-arm64.exe\`.
+          - **macOS (Apple Silicon):** \`horizon-launcher-macos-arm64.dmg\`, or
+            \`horizon-launcher-macos-arm64.zip\` (the portable app).
+          - **macOS (Intel):** \`horizon-launcher-macos-x64.dmg\`, or
+            \`horizon-launcher-macos-x64.zip\`.
+          - **Linux:** \`horizon-launcher-linux-x86_64.tar.gz\`, or the double-clickable
+            \`horizon-launcher-linux-x86_64.AppImage\`.
 
           ### Updates keep the patch
           This launcher updates **itself** from this repository: clicking Update installs
@@ -186,6 +261,12 @@ jobs:
           read the official feed: install 0.2.42 manually once to switch.) The
           \`HORIZON_LAUNCHER_NO_SELF_UPDATE=1\` environment variable now only means
           "never update myself" — it is no longer needed to keep the patch.
+
+          ### About the macOS and ARM64 builds
+          The macOS app and .dmg are **signed ad hoc** (this repository has no Apple Developer
+          identity): the first start may need a right-click → Open, or
+          \`xattr -cr /Applications/Horizon.app\`. The Windows ARM64 launcher installs the
+          x64 game build where a Nightly has no ARM64 one, like the official launcher does.
 
           ### Checksums
           \`SHA256SUMS\` lists every archive's SHA-256; \`SHA256SUMS.sig\` is its
@@ -201,10 +282,16 @@ jobs:
           — the offline patch this build re-applies onto the official sources. Not
           affiliated with Mojang or Microsoft.
           BODY
-          gh release view "$TAG" --json assets --jq . > /dev/null 2>&1 && echo "release $TAG already exists" || {
+          assets=(dist/horizon-launcher-* dist/SHA256SUMS dist/SHA256SUMS.sig)
+          if gh release view "$TAG" --json assets --jq . > /dev/null 2>&1; then
+            # The release exists (a rebuild of the same version): replace its assets where the
+            # file names collide and refresh the notes with this build's download list.
+            gh release upload "$TAG" --clobber "${assets[@]}"
+            gh release edit "$TAG" --notes-file notes.md
+          else
             gh release create "$TAG" --title "Horizon Offline Launcher $version" \
-              --notes-file notes.md dist/horizon-launcher-* dist/SHA256SUMS dist/SHA256SUMS.sig
-          }
+              --notes-file notes.md "${assets[@]}"
+          fi
           ls -l dist
       - uses: actions/upload-artifact@v7
         with:
