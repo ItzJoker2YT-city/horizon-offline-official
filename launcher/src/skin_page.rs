@@ -254,11 +254,11 @@ impl Launcher {
                         .line_height(px(16.))
                         .child(tr(
                             "A 64×64 (or 64×32) skin PNG and a 64×32 cape PNG, kept by the \
-                             launcher and given to the game when this name plays. You see them \
-                             on yourself in single player and on servers that send no skin of \
-                             their own; other players see them only where the server shows \
-                             skins for names (SkinsRestorer: /skin).",
-                        ))),
+                     launcher and given to the game when this name plays. You see them \
+                     on yourself in single player and on servers that send no skin of \
+                     their own; other players see them only where the server shows \
+                     skins for names (SkinsRestorer: /skin).",
+                        )),
                 ),
         )
     }
