@@ -24,7 +24,9 @@ pub fn draws_brand(window: &Window) -> bool {
 pub fn options() -> TitlebarOptions {
     TitlebarOptions {
         title: Some("Horizon Offline".into()),
-        appears_transparent: DRAWN,
+        // macOS and Windows place the GPUI content under the native title bar. Linux uses
+        // client-side decorations below, so its title bar is transparent by construction.
+        appears_transparent: cfg!(any(target_os = "macos", target_os = "windows")),
         ..Default::default()
     }
 }
