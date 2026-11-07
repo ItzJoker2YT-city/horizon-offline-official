@@ -7,10 +7,13 @@ name: sync
 #   2. sync-source checks out that tag's sources, cherry-picks everything after
 #      PATCH_SHA on main (the offline patch and every offline change, and never
 #      a past sync commit nor a plain-official restore) onto them with our
-#      hunks winning (`-X theirs`), then
-#      converges every path no offline commit owns to the official tag's exact
-#      content, restores our CI files and our release-keys.txt line, commits
-#      the result to main and pushes its tag,
+#      hunks winning (`-X theirs`); a conflicted file keeps the official side
+#      and only the pick's own change is re-applied as a true 3-way apply,
+#      which fails the sync loudly instead of blending a stale vintage
+#      silently; then every path no offline commit owns is converged to the
+#      official tag's exact content, our CI files and release-keys.txt line are
+#      restored, the whole workspace is type-checked BEFORE anything is
+#      committed or tagged, and only then main is pushed with its tag,
 #   3. publish calls build.yml to build, sign and release that tag here.
 #
 # The launcher's self-update feed reads this repository (LAUNCHER_UPDATES_REPO
@@ -87,7 +90,7 @@ jobs:
     needs: watch
     if: needs.watch.outputs.version != ''
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 40
     permissions:
       contents: write
     defaults:
@@ -99,6 +102,8 @@ jobs:
           # Full history: the offline flavor is cherry-picked with each commit's
           # parent along, and the push reuses our history instead of growing a new one.
           fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: The official sources with the offline patch re-applied
         env:
           VERSION: ${{ needs.watch.outputs.version }}
@@ -153,11 +158,25 @@ jobs:
             git cherry-pick -n -X theirs "$r" || {
               code=$?
               [ "$code" -eq 1 ] || exit "$code"
+              # Settle-v3: a conflicted file never takes the pick's whole old
+              # vintage. The official side wins the file first, then only THIS
+              # pick's own change is re-applied through a true 3-way apply
+              # against what official has now. Where that cannot merge cleanly
+              # the sync stops loudly: mending on main and letting the next
+              # watch tick retry is the way, never a silent blend.
               for p in $(git diff --name-only --diff-filter=U); do
-                if git cat-file -e "$r:$p" 2>/dev/null; then
-                  git checkout "$r" -- "$p"
-                else
+                if ! git cat-file -e "$r:$p" 2>/dev/null; then
                   git rm -f --quiet -- "$p"
+                elif git cat-file -e "refs/tags/official-$VERSION:$p" 2>/dev/null; then
+                  git checkout "refs/tags/official-$VERSION" -- "$p"
+                  if ! git diff "$r^" "$r" -- "$p" | git apply -3; then
+                    echo "::error::offline change to $p does not settle on official launcher@$VERSION — fix it on main (a repro commit), then the watch retries" >&2
+                    echo "::error::this pick's change to $p (first-parent diff):" >&2
+                    git diff "$r^" "$r" -- "$p" >&2 || true
+                    exit 1
+                  fi
+                else
+                  git checkout "$r" -- "$p"
                 fi
               done
             }
@@ -231,6 +250,21 @@ jobs:
             # what the release below builds.
             echo "nothing to sync: launcher@$VERSION is already on main"
           else
+            # Settle-v3 gate: the synced tree type-checks BEFORE anything is
+            # committed or tagged. A mechanical blend that no longer compiles
+            # (a rewritten official file under an offline edit) refuses to
+            # touch this repository at all: main keeps its last green tree,
+            # the watch retries after a fix lands on main. The check runs on
+            # the Linux runner — the platform whose cfg-only failures other
+            # runners cannot see (the launcher@0.2.49 lesson).
+            if ! cargo check --locked > "$PWD/.sync-cargo-check.log" 2>&1; then
+              echo "type-check FAILED; nothing was committed, tagged or pushed:" >&2
+              tail -n 120 "$PWD/.sync-cargo-check.log" >&2 || true
+              rm -f "$PWD/.sync-cargo-check.log"
+              git reset --hard main
+              exit 1
+            fi
+            rm -f "$PWD/.sync-cargo-check.log"
             git commit -m "Sync: official launcher@$VERSION with the offline patch re-applied"
             git push origin HEAD:main
           fi
