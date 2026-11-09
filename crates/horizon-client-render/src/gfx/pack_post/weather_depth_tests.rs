@@ -187,7 +187,6 @@ fn pack(
             weather: true,
             hand: false,
         },
-        &Default::default(),
     )
     .expect("weather pack runs");
     assert!(

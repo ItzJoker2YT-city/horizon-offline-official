@@ -415,9 +415,10 @@ impl DensityGraph {
             input,
             holder: Some(holder),
         } = node
-            && self.holders.get(holder.0) != Some(&input)
         {
-            return Err(CompileError::UnknownHolder);
+            if self.holders.get(holder.0) != Some(&input) {
+                return Err(CompileError::UnknownHolder);
+            }
         }
         if let GraphNode::Noise { noise, .. } | GraphNode::OffsetNoise { noise, .. } = node {
             self.noise_entry(noise)?;
@@ -427,9 +428,10 @@ impl DensityGraph {
             branches,
             ..
         } = &node
-            && (branches.len() != thresholds.len().saturating_add(1) || branches.len() > 256)
         {
-            return Err(CompileError::InvalidIntervals);
+            if branches.len() != thresholds.len().saturating_add(1) || branches.len() > 256 {
+                return Err(CompileError::InvalidIntervals);
+            }
         }
         // Fastutil threshold lists compare zeros numerically but hash their
         // signed bits. Among equal definitions, the only possible hash delta

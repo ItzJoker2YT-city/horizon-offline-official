@@ -27,7 +27,6 @@ pub struct Illusions {
 pub const MIRROR: u8 = 4;
 pub const BLINDNESS_SPELL: u8 = 5;
 
-/// `Illusioner.registerGoals`.
 pub fn register(m: &mut Mob) {
     let g = &mut m.ai.goals;
     g.add(0, Float);
@@ -53,17 +52,13 @@ pub fn register(m: &mut Mob) {
         Species::Ravager,
     ];
     m.ai.targets.add(1, hurt);
+    m.ai.targets.add(2, NearestTarget::player(true));
+    m.ai.targets.add(
+        3,
+        NearestTarget::species(&[Species::Villager, Species::WanderingTrader], false),
+    );
     m.ai.targets
-        .add(2, NearestTarget::player(true).unseen_memory(300));
-    m.ai.targets.add(
-        3,
-        NearestTarget::species(&[Species::Villager, Species::WanderingTrader], false)
-            .unseen_memory(300),
-    );
-    m.ai.targets.add(
-        3,
-        NearestTarget::species(&[Species::IronGolem], false).unseen_memory(300),
-    );
+        .add(3, NearestTarget::species(&[Species::IronGolem], false));
 }
 
 /// `Illusioner.finalizeSpawn`: a bow in the main hand.

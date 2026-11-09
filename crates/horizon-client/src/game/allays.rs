@@ -12,29 +12,6 @@ use horizon_core::random::RandomSource;
 
 impl Game<'_> {
     /// The client's `Allay.mobInteract` runs before the server's response.
-    /// Whether `predict_allay_interaction` would act, on a copy of the allay.
-    pub(super) fn allay_would_take(
-        &self,
-        index: usize,
-        hand: Hand,
-        offered: Option<ItemStack>,
-    ) -> bool {
-        let duplicates = offered.as_ref().is_some_and(|s| {
-            self.items()
-                .item_tags
-                .get("minecraft:duplicates_allays")
-                .is_some_and(|tag| tag.contains(&*s.item))
-        });
-        allay::interaction::predict(
-            &mut self.mobs[index].clone(),
-            offered.as_ref(),
-            hand == Hand::Main,
-            duplicates,
-            self.acting_uuid(),
-        )
-        .is_some()
-    }
-
     pub(super) fn predict_allay_interaction(
         &mut self,
         index: usize,
@@ -225,27 +202,16 @@ impl Game<'_> {
         let host = self
             .player_view()
             .filter(|p| !p.spectator && self.level.player_uuid.unwrap_or([0, 0, 0, 1]) == uuid)
-            .map(|p| (p.position, p.eye));
+            .map(|p| p.position);
         let found = host.or_else(|| {
             self.lan_present()
                 .into_iter()
                 .find(|p| p.uuid == uuid && !p.spectator)
                 .map(|p| {
-                    (
-                        horizon_core::geometry::Vec3::new(
-                            p.position[0],
-                            p.position[1],
-                            p.position[2],
-                        ),
-                        p.eye,
-                    )
+                    horizon_core::geometry::Vec3::new(p.position[0], p.position[1], p.position[2])
                 })
         });
-        // The 64-block search uses the feet; the deposit point is the eyes
-        // (`new EntityTracker(player, true)`).
-        found
-            .filter(|(feet, _)| feet.distance_squared(m.position) < 64.0 * 64.0)
-            .map(|(_, eye)| horizon_core::geometry::Vec3::new(eye[0], eye[1], eye[2]))
+        found.filter(|p| p.distance_squared(m.position) < 64.0 * 64.0)
     }
     /// `GoAndGiveItemsToTarget` / `AllayAi.throwItem`: within 3 blocks of
     /// the deposit, one item a tick, each restarting the three-second pause
@@ -283,14 +249,13 @@ impl Game<'_> {
         };
         let from = [
             m.position.x,
-            m.position.y + m.eye_height() - 0.2,
+            m.position.y + m.eye_height() - 0.3,
             m.position.z,
         ];
-        // BehaviorUtils.throwItem: the vector runs from the allay's feet.
         let d = [
-            target.x - m.position.x,
-            target.y + 1.0 - m.position.y,
-            target.z - m.position.z,
+            target.x - from[0],
+            target.y + 1.0 - from[1],
+            target.z - from[2],
         ];
         let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-6);
         let v = [d[0] / len * 0.2, d[1] / len * 0.3, d[2] / len * 0.2];

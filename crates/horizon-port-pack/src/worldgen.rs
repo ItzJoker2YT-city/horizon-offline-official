@@ -534,7 +534,6 @@ pub fn piece_counts<R: Read + std::io::Seek>(
     zip: &mut zip::ZipArchive<R>,
 ) -> BTreeMap<String, Value> {
     let mut out = BTreeMap::new();
-    let mut budget = crate::entry::Budget::archive();
     for i in 0..zip.len() {
         let Ok(mut entry) = zip.by_index(i) else {
             continue;
@@ -556,11 +555,11 @@ pub fn piece_counts<R: Read + std::io::Seek>(
         } else {
             continue;
         };
-        let declared = entry.size();
-        let Ok(v) = budget
-            .read_text(&mut entry, declared, crate::entry::MAX_TEXT)
+        let mut text = String::new();
+        let Ok(v) = entry
+            .read_to_string(&mut text)
             .map_err(|_| ())
-            .and_then(|text| serde_json::from_str::<Value>(&text).map_err(|_| ()))
+            .and_then(|_| serde_json::from_str::<Value>(&text).map_err(|_| ()))
         else {
             continue;
         };
@@ -614,10 +613,10 @@ fn moogs_spacing(p: &mut Value, lost: &mut BTreeMap<String, usize>) {
     let separation = scaled("separation").min(spacing - 1);
     p["spacing"] = spacing.into();
     p["separation"] = separation.into();
-    if let Some(o) = p.as_object_mut()
-        && o.remove("when_replacing").is_some()
-    {
-        *lost.entry("when_replacing".into()).or_default() += 1;
+    if let Some(o) = p.as_object_mut() {
+        if o.remove("when_replacing").is_some() {
+            *lost.entry("when_replacing".into()).or_default() += 1;
+        }
     }
 }
 
@@ -702,7 +701,6 @@ pub fn structure_set_tags<R: Read + std::io::Seek>(
     zip: &mut zip::ZipArchive<R>,
 ) -> BTreeMap<String, Vec<String>> {
     let mut raw: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut budget = crate::entry::Budget::archive();
     for i in 0..zip.len() {
         let Ok(mut entry) = zip.by_index(i) else {
             continue;
@@ -717,14 +715,10 @@ pub fn structure_set_tags<R: Read + std::io::Seek>(
         else {
             continue;
         };
-        let declared = entry.size();
-        let Ok(v) = budget
-            .read_text(&mut entry, declared, crate::entry::MAX_TEXT)
-            .map_err(drop)
-            .and_then(|text| {
-                serde_json::from_str::<Value>(text.trim_start_matches('\u{feff}')).map_err(drop)
-            })
-        else {
+        let mut text = String::new();
+        let Ok(v) = entry.read_to_string(&mut text).map_err(drop).and_then(|_| {
+            serde_json::from_str::<Value>(text.trim_start_matches('\u{feff}')).map_err(drop)
+        }) else {
             continue;
         };
         let values = v["values"].as_array().into_iter().flatten();
@@ -782,7 +776,6 @@ pub fn loader_biome_tags(work: &Path) -> BTreeMap<String, Value> {
         else {
             continue;
         };
-        let mut budget = crate::entry::Budget::archive();
         for i in 0..zip.len() {
             let Ok(mut entry) = zip.by_index(i) else {
                 continue;
@@ -797,11 +790,11 @@ pub fn loader_biome_tags(work: &Path) -> BTreeMap<String, Value> {
             else {
                 continue;
             };
-            let declared = entry.size();
-            if let Ok(text) = budget.read_text(&mut entry, declared, crate::entry::MAX_TEXT)
-                && let Ok(v) = serde_json::from_str(&text)
-            {
-                out.insert(path, v);
+            let mut text = String::new();
+            if entry.read_to_string(&mut text).is_ok() {
+                if let Ok(v) = serde_json::from_str(&text) {
+                    out.insert(path, v);
+                }
             }
         }
     }

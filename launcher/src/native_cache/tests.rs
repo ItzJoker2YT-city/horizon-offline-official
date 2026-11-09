@@ -282,21 +282,6 @@ impl Drop for Process {
     }
 }
 
-fn retry_busy<T>(mut run: impl FnMut() -> io::Result<T>) -> io::Result<T> {
-    let start = Instant::now();
-    loop {
-        match run() {
-            Ok(value) => return Ok(value),
-            Err(err)
-                if err.raw_os_error() == Some(26) && start.elapsed() < Duration::from_secs(2) =>
-            {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(err) => return Err(err),
-        }
-    }
-}
-
 #[test]
 fn real_cargo_build_is_protected_and_installed_copy_survives_cleanup() {
     let dir = Temp::new();
@@ -365,18 +350,11 @@ fn real_cargo_build_is_protected_and_installed_copy_survives_cleanup() {
     dir.put("fixture/resume", b"continue");
     cargo.wait();
     let binary = format!("native-cache-fixture{}", std::env::consts::EXE_SUFFIX);
-    let installed = dir.0.join(format!("versions/native/{binary}"));
-    fs::create_dir_all(installed.parent().unwrap()).unwrap();
-    let temp_installed = dir.0.join(format!("versions/native/{binary}.tmp"));
-    fs::copy(
-        dir.0.join("native/target/fast").join(&binary),
-        &temp_installed,
-    )
-    .unwrap();
-    fs::rename(&temp_installed, &installed).unwrap();
+    let installed = dir.put(&format!("versions/native/{binary}"), b"");
+    fs::copy(dir.0.join("native/target/fast").join(&binary), &installed).unwrap();
     assert!(cache.clear().unwrap() > 0);
     assert!(!dir.0.join("native/target/fast").join(binary).exists());
-    let output = retry_busy(|| Command::new(&installed).output()).unwrap();
+    let output = Command::new(&installed).output().unwrap();
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout).unwrap().trim(),
@@ -387,13 +365,11 @@ fn real_cargo_build_is_protected_and_installed_copy_survives_cleanup() {
     // without deleting its control file, unlike a stale PID or create_new marker.
     let ready = dir.0.join("lease-ready");
     let mut holder = Process(
-        retry_busy(|| {
-            Command::new(&installed)
-                .arg(dir.0.join("native/.build.lock"))
-                .arg(&ready)
-                .spawn()
-        })
-        .unwrap(),
+        Command::new(&installed)
+            .arg(dir.0.join("native/.build.lock"))
+            .arg(&ready)
+            .spawn()
+            .unwrap(),
     );
     let started = Instant::now();
     while !ready.exists() {

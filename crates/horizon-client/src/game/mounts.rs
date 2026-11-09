@@ -170,7 +170,6 @@ impl Game<'_> {
         self.mobs[index].set_saddle(None);
         let context = self.who_context(Some(Who::Player), None);
         self.post_game_event("minecraft:shear", [at.x, at.y, at.z], context);
-        self.mob_equip_event(id, [at.x, at.y, at.z], false);
         self.spawn_at_location(at, offset, saddle.clone());
         let target = self.mob_entity(&self.mobs[index]);
         self.trigger_item_entity("minecraft:player_sheared_equipment", &saddle, &target);
@@ -191,11 +190,8 @@ impl Game<'_> {
             } else {
                 "minecraft:entity.pig.saddle"
             };
-            self.audio.play(sound, Some(at), 1.0, 1.0);
+            self.audio.play(sound, Some(at), 0.5, 1.0);
             self.consume_held();
-            let id = self.mobs[index].id;
-            let pos = self.mobs[index].position;
-            self.mob_equip_event(id, [pos.x, pos.y, pos.z], true);
             self.world
                 .modified
                 .insert((at[0].floor() as i32 >> 4, at[2].floor() as i32 >> 4));
@@ -207,7 +203,7 @@ impl Game<'_> {
             return false;
         }
         let id = m.id;
-        if !self.native_may_board(id) {
+        if !self.may_board() || !self.native_may_board(id) {
             return true;
         }
         self.start_riding(id);
@@ -365,15 +361,8 @@ impl Game<'_> {
         if let Some(sound) = sound {
             let pitch =
                 (self.world.random.next_float() - self.world.random.next_float()) * 0.2 + 1.0;
-            let chest = item == "minecraft:chest";
-            self.audio
-                .play(sound, Some(at), if chest { 0.5 } else { 1.0 }, pitch);
+            self.audio.play(sound, Some(at), 0.5, pitch);
             self.consume_held();
-            if !chest {
-                let id = self.mobs[index].id;
-                let pos = self.mobs[index].position;
-                self.mob_equip_event(id, [pos.x, pos.y, pos.z], true);
-            }
             self.world
                 .modified
                 .insert((at[0].floor() as i32 >> 4, at[2].floor() as i32 >> 4));
@@ -381,7 +370,7 @@ impl Game<'_> {
         }
         // doPlayerRide
         let id = self.mobs[index].id;
-        if !self.native_may_board(id) {
+        if !self.may_board() || !self.native_may_board(id) {
             return true;
         }
         let m = &mut self.mobs[index];

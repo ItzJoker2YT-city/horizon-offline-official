@@ -168,16 +168,6 @@ pub(super) fn player_joined(id: u128, name: &str) {
     }
 }
 
-/// A player in the user cache by name (`UserCache::find_by_name`), on a dedicated server.
-pub(super) fn cached_user_by_name(name: &str) -> Option<NameAndId> {
-    USER_CACHE.lock().unwrap().as_ref()?.find_by_name(name)
-}
-
-/// A player in the user cache by id, on a dedicated server.
-pub(super) fn cached_user_by_id(id: u128) -> Option<NameAndId> {
-    USER_CACHE.lock().unwrap().as_mut()?.get_by_id(id)
-}
-
 /// `server.toml`'s `[anticheat]`, beside server.properties when horizon-server runs the game; the
 /// default (on) without the file or the section, off (with an error logged) when the section is wrong.
 fn load_anticheat() -> horizon_anticheat::Config {
@@ -418,19 +408,6 @@ pub(super) fn preflight(options: &mut Options) -> Result<bool> {
         horizon_client::command::vanilla::set_horizon_commands(true);
     }
     props.store(&settings)?;
-    // `RegionFileVersion.configure`: the compression every region file this
-    // server writes uses, from `region-file-compression`. An unknown name is
-    // logged with the ones there are, and the default (deflate) stays.
-    if !horizon_world::compression::Compression::configure(&props.region_file_compression) {
-        log(
-            "ERROR",
-            &format!(
-                "Invalid `region-file-compression` value `{}` in server.properties. Please use one of: {}",
-                props.region_file_compression,
-                horizon_world::compression::REGION_FILE_NAMES.join(",")
-            ),
-        );
-    }
     let eula_file = PathBuf::from("eula.txt");
     let agreed = match eula::agreed(&eula_file) {
         Ok(a) => a,
@@ -1626,15 +1603,6 @@ impl Game<'_> {
     /// server (permission level 4). The dedicated-only commands are here;
     /// everything else goes to the game's dispatcher.
     fn console_command(&mut self, state: &mut ServerState, line: &str) {
-        let (mut cancel, mut replies) = (false, Vec::new());
-        let source = if self.rcon_source { "rcon" } else { "console" };
-        self.native_console_line(source, line, &mut cancel, &mut replies);
-        for reply in replies {
-            self.console_reply(reply);
-        }
-        if cancel {
-            return;
-        }
         let line = line.strip_prefix('/').unwrap_or(line);
         let mut words = line.split_whitespace();
         let Some(command) = words.next() else {

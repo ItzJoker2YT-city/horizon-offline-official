@@ -359,26 +359,8 @@ impl Game<'_> {
                     .into_iter()
                     .zip(["helmet", "chestplate", "leggings", "boots"])
             }));
-        // The smithing screen's preview stand wears the result slot's item.
-        let preview = self
-            .station
-            .as_ref()
-            .filter(|s| s.kind == super::stations::Kind::Smithing)
-            .and_then(|s| s.result.as_ref())
-            .map(|stack| {
-                let equip = items.get(&stack.item).and_then(|i| i.equip_slot.as_deref());
-                let layer = match preview_slot(equip) {
-                    2 => "boots",
-                    3 => "leggings",
-                    4 => "chestplate",
-                    5 => "helmet",
-                    _ => "",
-                };
-                (Some(stack), layer)
-            });
-        let stacks = stacks.map(|(s, l)| (s.as_ref(), l)).chain(preview);
         for (stack, layer) in stacks {
-            let Some(stack) = stack.filter(|s| s.extra.is_some()) else {
+            let Some(stack) = stack.as_ref().filter(|s| s.extra.is_some()) else {
                 continue;
             };
             let Some(asset) = items
@@ -522,27 +504,6 @@ impl Game<'_> {
         let drop = self.drop_offset_from(0.5, 1.975, (pos[0], pos[1], pos[2]), true);
         stand.position.y = f64::from(pos[1]) + drop;
         stand.previous = stand.position;
-        // `EntityType.createDefaultStackConfig`: the item's `custom_data`, then its
-        // `entity_data` merged over the stand; `ArmorStandItem.useOn` then snaps it
-        // to the placement yaw with pitch 0.
-        let own = horizon_client::entity_nbt::armor_stand_to_nbt(&stand, [0; 4], None);
-        let mut raw = horizon_client::block_entity_item::stack_configured_entity(
-            stack,
-            "minecraft:armor_stand",
-            &own,
-        );
-        if let Some(mut loaded) = horizon_client::entity_nbt::armor_stand_from_nbt(&raw, stand.id) {
-            loaded.first_tick = stand.first_tick;
-            loaded.yaw = stand.yaw;
-            loaded.previous_yaw = stand.previous_yaw;
-            loaded.pitch = 0.0;
-            loaded.previous = loaded.position;
-            stand = loaded;
-        }
-        if let horizon_world::nbt::Tag::Compound(map) = &mut raw {
-            map.remove(&"UUID".into());
-        }
-        self.persist.raw.insert(stand.id, raw);
         let foot = stand.position;
         // EntityType.create's spawn yaw, `level.getRandom().nextFloat() * 360`, before
         // ArmorStandItem.useOn turns the stand to face the player.
@@ -856,8 +817,6 @@ impl Game<'_> {
             self.audio
                 .play("minecraft:entity.armor_stand.break", Some(at), 1.0, 1.0);
             self.show_breaking_particles(at, f64::from(width), f64::from(height));
-            // ArmorStand.kill(level, player).
-            self.entity_killed_event(at, true);
             return true;
         }
         if time - self.armor_stands[i].last_hit > 5 {
@@ -890,8 +849,6 @@ impl Game<'_> {
             ];
             self.spawn_item(stack, center, v, 10);
         }
-        // ArmorStand.kill(level, player), after the drops.
-        self.entity_killed_event(at, true);
         self.world
             .modified
             .insert(((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4));
@@ -1091,7 +1048,6 @@ impl Game<'_> {
         }
         self.audio
             .play("minecraft:entity.armor_stand.break", Some(at), 1.0, 1.0);
-        self.entity_killed_event(at, false);
         self.world.modified.insert((pos[0] >> 4, pos[2] >> 4));
     }
     /// ArmorStandRenderer: the stand with its default pose, then armor layers.
@@ -1154,13 +1110,12 @@ impl Game<'_> {
                 )
                 * glam::Mat4::from_scale(glam::Vec3::new(-1.0, -1.0, 1.0))
                 * glam::Mat4::from_translation(glam::Vec3::new(0.0, -1.501, 0.0));
-            // `EntityRenderer.getPackedLightCoords`: the block
-            // `ArmorStand.getLightProbePosition` gives - the brightest cell of a
-            // marker's own box, else the stand's eye - at 15 block light while
-            // it burns.
-            let probe = a.light_probe(alpha, |x, y, z| self.world.light(x, y, z));
-            let light = self.world.light(probe[0], probe[1], probe[2]);
-            let packed = a.render_light(light);
+            let light = self.world.light(
+                at.x.floor() as i32,
+                (at.y + 0.5).floor() as i32,
+                at.z.floor() as i32,
+            );
+            let packed = (u32::from(light >> 4) * 16) | ((u32::from(light & 15) * 16) << 8);
             let skinned = if skinning {
                 let mut models = self.skin_models.borrow_mut();
                 let mut frame = self.skin_frame.borrow_mut();
@@ -1674,8 +1629,8 @@ impl Game<'_> {
                 .extra
                 .as_deref()
                 .and_then(|d| d.other.iter().find(|(k, _)| k == "minecraft:profile"))
-                .map(|(_, t)| self.skin_profiles.borrow_mut().head_profile_nbt(t))
-                .unwrap_or_else(|| std::sync::Arc::new(serde_json::Value::Null));
+                .map(|(_, t)| horizon_client::scoreboard::tag_to_json(t))
+                .unwrap_or(serde_json::Value::Null);
             self.pack.item_renderer.submit_special(
                 &special,
                 &profile,

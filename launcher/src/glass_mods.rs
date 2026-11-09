@@ -79,34 +79,15 @@ impl Launcher {
                 })),
             );
         }
-        let wide = self.window_width >= crate::glass_home::SIDE_BY_SIDE;
-        let header = if wide {
-            div()
-                .flex()
-                .flex_row()
-                .items_end()
-                .justify_between()
-                .gap(px(20.))
-                .pt(px(40. - crate::glass::CONTENT_INSET))
-                .mb(px(28.))
-                .child(head.min_w_0())
-                .child(tabs)
-        } else {
-            div()
-                .flex()
-                .flex_col()
-                .items_start()
-                .gap(px(16.))
-                .pt(px(40. - crate::glass::CONTENT_INSET))
-                .mb(px(28.))
-                .child(head.w_full().min_w_0())
-                .child(
-                    tabs.id("mods-kind-tabs")
-                        .w_full()
-                        .overflow_x_scroll()
-                        .on_scroll(|_, _, cx| cx.stop_propagation()),
-                )
-        };
+        let header = div()
+            .flex()
+            .items_end()
+            .justify_between()
+            .gap(px(20.))
+            .pt(px(40. - crate::glass::CONTENT_INSET))
+            .mb(px(28.))
+            .child(head.min_w_0())
+            .child(tabs);
 
         // Installation can pause for consent in either view. Keep the notice before
         // the project or results, rather than below a potentially long detail card.
@@ -185,15 +166,15 @@ impl Launcher {
         let detail = self.glass_mod_detail(&instance, cx).map(|d| {
             let down = self.mods_sticky.offset(&self.content_scroll.handle);
             d.flex_none()
-                .when(wide, |d| d.w(px(DETAIL)).top(px(down)))
-                .when(!wide, |d| d.w_full())
+                .w(px(DETAIL))
+                .top(px(down))
                 .child(self.mods_sticky.panel())
         });
         let cards = div()
             .relative()
             .flex()
-            .when(wide, |d| d.flex_row().items_start().gap(px(10.)))
-            .when(!wide, |d| d.flex_col().gap(px(10.)))
+            .items_start()
+            .gap(px(10.))
             .child(self.mods_sticky.row(&self.content_scroll.handle))
             .child(list)
             .children(detail);

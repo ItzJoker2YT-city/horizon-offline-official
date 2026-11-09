@@ -6,7 +6,6 @@
 pub mod actions;
 pub mod clipboard;
 pub mod gamepad;
-pub mod gameplay_guide;
 pub mod held;
 pub mod input;
 pub mod interaction_input;

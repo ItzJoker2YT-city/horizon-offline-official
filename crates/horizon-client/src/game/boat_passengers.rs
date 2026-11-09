@@ -415,7 +415,6 @@ impl Game<'_> {
             let b = &self.boats[i];
             let full = count == b.max_passengers();
             let delta = b.delta_rotation;
-            let boat_box = b.bounds();
             let seats: Vec<_> = mobs
                 .iter()
                 .enumerate()
@@ -438,16 +437,14 @@ impl Game<'_> {
                         .entity_has("minecraft:can_turn_in_boats", &m.kind.id);
                     (
                         j,
-                        offset,
                         b.seat(index, count, animal, offset, false),
                         b.seat(index, count, animal, offset, true),
                         turns.then_some((b.yaw + turn, b.previous_yaw + turn)),
                     )
                 })
                 .collect();
-            for (j, offset, at, previous, facing) in seats {
+            for (j, at, previous, facing) in seats {
                 let m = &mut self.mobs[j];
-                m.seated(id, offset, boat_box);
                 m.position = at;
                 m.previous = previous;
                 m.velocity = Vec3::ZERO;

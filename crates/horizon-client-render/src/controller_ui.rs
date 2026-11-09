@@ -65,44 +65,6 @@ pub struct Setting {
     pub item: Item,
     pub text: &'static str,
 }
-/// What the chosen value does, for a setting whose values each do something different.
-fn choice_description(opt: Opt, pad: &PadSettings) -> Option<&'static str> {
-    Some(match opt {
-        Opt::PadGameplayGuide => match pad.guide_detail {
-            gamepad::GuideDetail::Full => {
-                "Shows what your buttons do right now, in play and in inventories."
-            }
-            gamepad::GuideDetail::Basic => {
-                "Shows only what you can do with what you're looking at, and the main inventory buttons."
-            }
-            gamepad::GuideDetail::Off => "Doesn't show what your buttons do.",
-        },
-        Opt::PadGlyphs => match pad.glyphs {
-            GlyphStyle::Auto => "Shows the buttons of the controller you're using.",
-            GlyphStyle::Xbox => "Always shows Xbox buttons.",
-            GlyphStyle::PlayStation => "Always shows PlayStation buttons.",
-            GlyphStyle::Nintendo => "Always shows Nintendo buttons.",
-        },
-        Opt::PadKeyboard => match pad.keyboard {
-            gamepad::TextKeyboard::Auto => {
-                "Opens Steam's keyboard on a Steam Deck under Steam, and Horizon's otherwise."
-            }
-            gamepad::TextKeyboard::Horizon => "Always opens Horizon's keyboard.",
-            gamepad::TextKeyboard::Steam => "Always opens Steam's keyboard.",
-        },
-        Opt::PadLightbar => match pad.lightbar {
-            gamepad::Lightbar::Health => {
-                "A DualSense's light shows your health, from green through amber to red."
-            }
-            gamepad::Lightbar::Dimension => {
-                "A DualSense's light changes with the dimension you're in."
-            }
-            gamepad::Lightbar::Off => "A DualSense keeps its own light.",
-        },
-        _ => return None,
-    })
-}
-
 fn option(opt: Opt, text: &'static str) -> Setting {
     Setting {
         item: Item::Option(opt),
@@ -135,16 +97,10 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
             vec![
                 (
                     "Controller",
-                    vec![
-                        option(
-                            Opt::PadEnabled,
-                            "Off, the game ignores every controller for this player.",
-                        ),
-                        option(
-                            Opt::PadPlayInBackground,
-                            "The controller keeps playing while this window isn't focused, and losing focus won't pause.",
-                        ),
-                    ],
+                    vec![option(
+                        Opt::PadEnabled,
+                        "Off, the game ignores every controller for this player.",
+                    )],
                 ),
                 (
                     "Look",
@@ -179,16 +135,10 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                 ),
                 (
                     "Play",
-                    vec![
-                        option(
-                            Opt::PadGameplayGuide,
-                            "Show the buttons for what you can do, while you play with a controller.",
-                        ),
-                        option(
-                            Opt::PadTriggerThreshold,
-                            "How far a trigger is pulled before it counts as pressed.",
-                        ),
-                    ],
+                    vec![option(
+                        Opt::PadTriggerThreshold,
+                        "How far a trigger is pulled before it counts as pressed.",
+                    )],
                 ),
                 (
                     "Menus",
@@ -329,7 +279,6 @@ impl Item {
         match self {
             Item::Option(Opt::PadEnabled) => Some(c.enabled),
             Item::Option(Opt::PadVibration) => Some(c.vibration),
-            Item::Option(Opt::PadPlayInBackground) => Some(c.play_in_background),
             Item::Option(Opt::PadAdaptiveTriggers) => Some(c.adaptive_triggers),
             Item::Option(Opt::PadInvertX) => Some(c.invert_x),
             Item::Option(Opt::PadInvertY) => Some(c.invert_y),
@@ -623,7 +572,7 @@ impl ControllerUi {
             &cols,
             &lines,
             self.scroll.amount,
-            |page| lang::get(page.name()),
+            Page::name,
             |batch, setting: Setting, y| {
                 let item = setting.item;
                 let [rx, ry, rw, rh] = cols.row(y);
@@ -655,7 +604,6 @@ impl ControllerUi {
                             hover,
                             focused,
                             held: self.dragging == Some(item),
-                            key: None,
                         };
                         shell::row(batch, atlas, &cols, y, &view);
                     }
@@ -870,12 +818,8 @@ impl ControllerUi {
     /// What a row does. A binding names the controller's own buttons, and what else its button
     /// does when it shares it.
     fn description(&self, setting: Setting, s: &Settings) -> String {
-        let action = match setting.item {
-            Item::Bind(action) => action,
-            Item::Option(opt) => {
-                return lang::get(choice_description(opt, &s.controller).unwrap_or(setting.text));
-            }
-            _ => return lang::get(setting.text),
+        let Item::Bind(action) = setting.item else {
+            return lang::get(setting.text);
         };
         let pad = &s.controller;
         let style = self.context.style;
@@ -1321,7 +1265,6 @@ mod tests {
         for opt in [
             Opt::PadEnabled,
             Opt::PadVibration,
-            Opt::PadPlayInBackground,
             Opt::PadAdaptiveTriggers,
             Opt::PadLightbar,
             Opt::PadLookSensitivity,
@@ -1429,30 +1372,6 @@ mod tests {
         assert!((s.controller.move_deadzone - before - 0.01).abs() < 0.001);
     }
 
-    /// What the screen draws at the bottom of the page changes with the choice, in every one of
-    /// these settings.
-    #[test]
-    fn each_choice_describes_itself() {
-        let ui = ControllerUi::default();
-        let mut s = Settings::default();
-        for (opt, choices) in [
-            (Opt::PadGameplayGuide, 3),
-            (Opt::PadGlyphs, 4),
-            (Opt::PadKeyboard, 3),
-            (Opt::PadLightbar, 3),
-        ] {
-            let setting = option(opt, "the fixed sentence");
-            let mut seen = Vec::new();
-            for _ in 0..choices {
-                let text = ui.description(setting, &s);
-                assert_ne!(text, "the fixed sentence", "{opt:?}");
-                assert!(!seen.contains(&text), "{opt:?} repeats {text}");
-                seen.push(text);
-                opt.cycle(&mut s, false, FB);
-            }
-        }
-    }
-
     #[test]
     fn every_text_is_in_the_language_table() {
         let (_, missed) = lang::scoped(lang::Language::load(&[], "de_de"), || {
@@ -1464,18 +1383,6 @@ mod tests {
                     for row in rows {
                         lang::get(row.text);
                     }
-                }
-            }
-            let mut settings = Settings::default();
-            for opt in [
-                Opt::PadGameplayGuide,
-                Opt::PadGlyphs,
-                Opt::PadKeyboard,
-                Opt::PadLightbar,
-            ] {
-                for _ in 0..4 {
-                    lang::get(choice_description(opt, &settings.controller).unwrap());
-                    opt.cycle(&mut settings, false, FB);
                 }
             }
             for text in [

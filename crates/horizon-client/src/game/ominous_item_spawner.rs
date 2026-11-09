@@ -114,8 +114,7 @@ impl Game<'_> {
             let at = block(s.position);
             let center = at.map(|v| f64::from(v) + 0.5);
             if s.tick_count == s.spawn_item_after - ABOUT_TO_SPAWN {
-                self.audio.play_on(
-                    6, // SoundSource.NEUTRAL, as OminousItemSpawner.tickServer selects.
+                self.audio.play(
                     "minecraft:block.trial_spawner.about_to_spawn_item",
                     Some(center),
                     1.0,
@@ -238,6 +237,3 @@ impl Game<'_> {
         }
     }
 }
-
-#[cfg(test)]
-mod warning_tests;

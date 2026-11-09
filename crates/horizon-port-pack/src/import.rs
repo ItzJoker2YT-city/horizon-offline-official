@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::{
     collections::BTreeMap,
     fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -119,11 +120,12 @@ fn names(zip: &zip::ZipArchive<fs::File>) -> Result<Vec<String>, String> {
 }
 
 fn read_json(zip: &mut zip::ZipArchive<fs::File>, name: &str) -> Result<Option<Value>, String> {
-    let Ok(entry) = zip.by_name(name) else {
+    let Ok(mut entry) = zip.by_name(name) else {
         return Ok(None);
     };
-    let declared = entry.size();
-    let text = crate::entry::read_text(entry, declared, crate::entry::MAX_TEXT)
+    let mut text = String::new();
+    entry
+        .read_to_string(&mut text)
         .map_err(|e| format!("{name}: {e}"))?;
     serde_json::from_str(text.trim_start_matches('\u{feff}'))
         .map(Some)
@@ -307,10 +309,11 @@ fn instance(dir: &Path) -> Result<Pack, String> {
     }
     // A CurseForge app instance has no `mmc-pack.json`; fill only when that
     // file gave no Minecraft version, so Prism behaviour is unchanged.
-    if pack.minecraft.is_empty()
-        && let Some((minecraft, loader, loader_version)) = curseforge_instance_target(dir)
-    {
-        (pack.minecraft, pack.loader, pack.loader_version) = (minecraft, loader, loader_version);
+    if pack.minecraft.is_empty() {
+        if let Some((minecraft, loader, loader_version)) = curseforge_instance_target(dir) {
+            (pack.minecraft, pack.loader, pack.loader_version) =
+                (minecraft, loader, loader_version);
+        }
     }
     let game = game_dir(dir)?;
     let mods = if game.join("mods").is_dir() {

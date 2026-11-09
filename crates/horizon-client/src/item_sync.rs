@@ -477,7 +477,7 @@ fn fireworks_tag(e: &horizon_protocol::item::FireworkExplosion) -> Tag {
 }
 
 /// A `minecraft:profile` component as the item data JSON the model reads.
-pub fn profile_tag(p: &Profile) -> Tag {
+fn profile_tag(p: &Profile) -> Tag {
     let properties = p
         .properties
         .iter()

@@ -11,7 +11,6 @@
 
 use super::{Game, Result};
 use horizon_client::join_seq::{JoinSeq, Joined};
-use horizon_core::geometry::Vec3;
 use horizon_core::random::RandomSource as _;
 
 /// What this tick has ticked of the three kinds.
@@ -131,11 +130,6 @@ impl Game<'_> {
             .iter()
             .for_each(|e| offer(e.join, Pending::Falling));
         pending.sort_unstable_by_key(|&(j, _)| j);
-        // EntityGetter.getEntityCollisions: the boxes that stop these moves (a
-        // boat, a shulker, a happy ghast held still), gathered once for the
-        // run and again after an explosion, which can move or remove them.
-        let mut obstacles: Option<horizon_client::entities::ObstacleGrid> = None;
-        let mut nearby = Vec::new();
         for (join, kind) in pending {
             self.ordered.done = Some(join);
             // ServerLevel.tick: only entities in entity-ticking chunks tick.
@@ -145,23 +139,10 @@ impl Game<'_> {
                         continue;
                     };
                     let at = self.tnts[i].position;
-                    if entity_ticking(at.x.floor() as i32, at.z.floor() as i32) {
-                        let t = &self.tnts[i];
-                        let area = t.bounds().expand_towards(t.velocity);
-                        obstacles
-                            .get_or_insert_with(|| {
-                                horizon_client::entities::ObstacleGrid::new(
-                                    self.item_entity_collisions(),
-                                )
-                            })
-                            .near(area.inflate(Vec3::new(1.0, 1.0, 1.0)), &mut nearby);
-                        let count = self.tnts.len();
-                        if let Err(e) = self.tick_one_tnt(i, &nearby) {
-                            first_error.get_or_insert(e);
-                        }
-                        if self.tnts.len() < count {
-                            obstacles = None;
-                        }
+                    if entity_ticking(at.x.floor() as i32, at.z.floor() as i32)
+                        && let Err(e) = self.tick_one_tnt(i)
+                    {
+                        first_error.get_or_insert(e);
                     }
                 }
                 Pending::Falling => {
@@ -171,17 +152,7 @@ impl Game<'_> {
                     let at = self.falling[i].position;
                     if entity_ticking(at.x.floor() as i32, at.z.floor() as i32) {
                         events = true;
-                        let f = &self.falling[i];
-                        let area = horizon_client::falling_block::bounds(f.position)
-                            .expand_towards(f.velocity);
-                        obstacles
-                            .get_or_insert_with(|| {
-                                horizon_client::entities::ObstacleGrid::new(
-                                    self.item_entity_collisions(),
-                                )
-                            })
-                            .near(area.inflate(Vec3::new(1.0, 1.0, 1.0)), &mut nearby);
-                        if let Err(e) = self.tick_one_falling(i, &nearby) {
+                        if let Err(e) = self.tick_one_falling(i) {
                             first_error.get_or_insert(e);
                         }
                     }
@@ -191,17 +162,6 @@ impl Game<'_> {
                         continue;
                     };
                     let followed = followed.get_or_insert_with(|| self.orb_followed());
-                    // A block of slack around the move: gravity and the pull
-                    // towards a player change it before it is made.
-                    let o = &self.orbs[i];
-                    let area = o.bounds().expand_towards(o.velocity);
-                    obstacles
-                        .get_or_insert_with(|| {
-                            horizon_client::entities::ObstacleGrid::new(
-                                self.item_entity_collisions(),
-                            )
-                        })
-                        .near(area.inflate(Vec3::new(1.0, 1.0, 1.0)), &mut nearby);
                     let o = &mut self.orbs[i];
                     let distance = |feet: &[f64; 3]| -> f64 {
                         (feet[0] - o.position.x).powi(2)
@@ -226,7 +186,7 @@ impl Game<'_> {
                         let mut on_sound = |pos: [f64; 3], pitch: f32| {
                             audio.play("minecraft:entity.generic.burn", Some(pos), 0.4, pitch);
                         };
-                        o.tick_among(
+                        o.tick(
                             &self.world,
                             self.res.facts(),
                             self.collision,
@@ -236,7 +196,6 @@ impl Game<'_> {
                             Some(self.border.geometry()),
                             &self.res.motion().fluids,
                             &mut on_sound,
-                            &nearby,
                         )
                     };
                     // PowderSnowBlock.entityInside during the move, before an

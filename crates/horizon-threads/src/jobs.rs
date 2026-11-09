@@ -166,11 +166,10 @@ static CONFIGURED: AtomicUsize = AtomicUsize::new(0);
 static POOL: OnceLock<Pool> = OnceLock::new();
 
 /// The number of workers the machine gets by default: one thread per core
-/// but one ([`crate::default_workers`]: per performance core on Apple silicon), which the
-/// render and server threads share with them (they run ahead of the workers:
-/// [`crate::favour_current`], [`crate::behind_server`]).
+/// but one, which the render and server threads share with them (they run
+/// ahead of the workers: [`crate::favour_current`], [`crate::behind_server`]).
 pub fn default_threads() -> usize {
-    crate::default_workers()
+    crate::worker_count().saturating_sub(1).max(1)
 }
 
 /// Size the process's pool before its first use (later calls change

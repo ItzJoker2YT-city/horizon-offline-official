@@ -38,10 +38,8 @@ fn words(p: &horizon_shaders::Program, name: &str, n: usize) -> Vec<u32> {
         .unwrap()
         .offset as usize;
     p.interface.initial_values[offset..offset + n * 4]
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|b| u32::from_le_bytes(*b))
+        .chunks_exact(4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
         .collect()
 }
 #[test]

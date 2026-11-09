@@ -19,11 +19,6 @@ use std::{convert::Infallible, sync::OnceLock};
 /// `FluidRenderer.MAX_FLUID_HEIGHT`.
 const MAX_HEIGHT: f32 = 0.888_888_9;
 const EPSILON: f32 = 0.001;
-/// `super::step_index` of the unit steps of the padded index: one block east
-/// (+x), one south (+z), one up (+y).
-const X_STEP: isize = 1;
-const P_STEP: isize = super::P as isize;
-const UP: isize = super::step_index([0, 1, 0]);
 
 /// For the occlusion face toward `direction`: the height from the bottom over
 /// which its slice flush with the `direction` side covers the whole width
@@ -229,25 +224,26 @@ pub(super) fn tesselate(
         }
     };
     let info = &tables.info;
-    // The cell's own padded index: every other cell sampled here is a constant
-    // step from it (`super::step_index`), so no `pi` per sample.
-    let cell = pi(x, y, z) as isize;
-    let at = |step: isize| &info[pad.blocks[(cell + step) as usize] as usize];
-    let me = at(0);
+    let at = |p: [i32; 3]| &info[pad.blocks[pi(p[0], p[1], p[2])] as usize];
+    let me = at([x, y, z]);
     let kind = me.fluid.kind();
     let same = |s: &Info| s.fluid.kind().same_family(kind);
-    let neighbor = |d: Direction| at(super::OFFSETS[d as usize]);
+    let neighbor = |d: Direction| {
+        let [dx, dy, dz] = d.normal();
+        at([x + dx, y + dy, z + dz])
+    };
     let (down, up) = (neighbor(Direction::Down), neighbor(Direction::Up));
     let should_render = |d: Direction| !same(neighbor(d)) && !occluded_by_self(me, d);
     let render_up = !same(up);
     let render_down =
         should_render(Direction::Down) && !occluded_by(Direction::Down, MAX_HEIGHT, down);
     let sides = [
-        should_render(Direction::North),
-        should_render(Direction::South),
-        should_render(Direction::West),
-        should_render(Direction::East),
-    ];
+        Direction::North,
+        Direction::South,
+        Direction::West,
+        Direction::East,
+    ]
+    .map(should_render);
     if !render_up && !render_down && !sides.iter().any(|&s| s) {
         return;
     }
@@ -270,10 +266,10 @@ pub(super) fn tesselate(
             crate::mesher::emitting(pack_rgb(rgb), emission)
         }
     };
-    let height = |step: isize| -> f32 {
-        let s = at(step);
+    let height = |p: [i32; 3]| -> f32 {
+        let s = at(p);
         if same(s) {
-            if same(at(step + UP)) {
+            if same(at([p[0], p[1] + 1, p[2]])) {
                 1.0
             } else {
                 s.fluid.own_height()
@@ -284,15 +280,15 @@ pub(super) fn tesselate(
             -1.0
         }
     };
-    let own = height(0);
+    let own = height([x, y, z]);
     let (mut ne, mut nw, mut se, mut sw) = (1.0f32, 1.0f32, 1.0f32, 1.0f32);
     if own < 1.0 {
-        let n = height(-P_STEP);
-        let s = height(P_STEP);
-        let e = height(X_STEP);
-        let w = height(-X_STEP);
+        let n = height([x, y, z - 1]);
+        let s = height([x, y, z + 1]);
+        let e = height([x + 1, y, z]);
+        let w = height([x - 1, y, z]);
         // calculateAverageHeight(self, height2, height1, corner)
-        let average = |h2: f32, h1: f32, corner: isize| -> f32 {
+        let average = |h2: f32, h1: f32, corner: [i32; 3]| -> f32 {
             if h1 >= 1.0 || h2 >= 1.0 {
                 return 1.0;
             }
@@ -318,17 +314,16 @@ pub(super) fn tesselate(
             add(h2);
             sum[0] / sum[1]
         };
-        ne = average(n, e, X_STEP - P_STEP);
-        nw = average(n, w, -X_STEP - P_STEP);
-        se = average(s, e, X_STEP + P_STEP);
-        sw = average(s, w, -X_STEP + P_STEP);
+        ne = average(n, e, [x + 1, y, z - 1]);
+        nw = average(n, w, [x - 1, y, z - 1]);
+        se = average(s, e, [x + 1, y, z + 1]);
+        sw = average(s, w, [x - 1, y, z + 1]);
     }
-    let light = |step: isize| {
-        let i = (cell + step) as usize;
-        let above = (cell + step + UP) as usize;
+    let light = |p: [i32; 3]| {
+        let above = [p[0], p[1] + 1, p[2]];
         pack_coords(lighting::max_coords(
-            lighting::coords_at(pad, lighting::state_at(pad, info, i), i),
-            lighting::coords_at(pad, lighting::state_at(pad, info, above), above),
+            lighting::coords(pad, at(p), p),
+            lighting::coords(pad, at(above), above),
         ))
     };
     let (still, flow, overlay) = if water {
@@ -361,9 +356,9 @@ pub(super) fn tesselate(
             fluid_face(color, face)
         };
         let vertex = |(pos, uv)| TerrainVertex::new(pos, uv, layer, color, light);
-        target.extend([vertex(v[0]), vertex(v[1]), vertex(v[2]), vertex(v[3])]);
+        target.extend(v.map(vertex));
         if back {
-            target.extend([vertex(v[0]), vertex(v[3]), vertex(v[2]), vertex(v[1])]);
+            target.extend([v[0], v[3], v[2], v[1]].map(vertex));
         }
     };
     let (fx, fy, fz) = (x as f32, y as f32, z as f32);
@@ -399,7 +394,7 @@ pub(super) fn tesselate(
         // FluidState.shouldRenderBackwardUpFace over the 3x3 cells above.
         let backward = (-1..=1).any(|ox| {
             (-1..=1).any(|oz| {
-                let s = at(UP + ox as isize * X_STEP + oz as isize * P_STEP);
+                let s = at([x + ox, y + 1, z + oz]);
                 !same(s) && !s.solid
             })
         });
@@ -418,7 +413,7 @@ pub(super) fn tesselate(
             corners,
             layer,
             color(cardinal(D::Up)),
-            light(0),
+            light([x, y, z]),
             backward,
             Direction::Up as usize,
         );
@@ -434,12 +429,12 @@ pub(super) fn tesselate(
             ],
             still,
             color(cardinal(D::Down)),
-            light(-UP),
+            light([x, y - 1, z]),
             false,
             Direction::Down as usize,
         );
     }
-    let side_light = light(0);
+    let side_light = light([x, y, z]);
     let up_shade = cardinal(D::Up);
     for (i, d) in [
         Direction::North,

@@ -3,11 +3,7 @@
 //! checks every 100 ticks, breaking by attack (`dropItem`), saving, and
 //! `PaintingRenderer` quads.
 use super::{Game, Hit, entity_culling::default_range};
-use horizon_client::{
-    entities::{ItemFrame, Painting},
-    items::ItemStack,
-    mesher::Vertex,
-};
+use horizon_client::{entities::Painting, items::ItemStack, mesher::Vertex};
 use horizon_core::{
     geometry::{Aabb, Vec3},
     random::RandomSource,
@@ -80,24 +76,6 @@ impl PaintingVariants {
 fn overlaps(a: ([f64; 3], [f64; 3]), b: ([f64; 3], [f64; 3])) -> bool {
     (0..3).all(|i| a.0[i] < b.1[i] && b.0[i] < a.1[i])
 }
-/// `HangingEntity.canCoexist(true)` for an item frame.
-pub(super) fn frame_coexists(f: &ItemFrame, frames: &[ItemFrame], paintings: &[Painting]) -> bool {
-    !frames
-        .iter()
-        .any(|o| o.id != f.id && o.facing == f.facing && overlaps(o.bounds(), f.bounds()))
-        && !paintings
-            .iter()
-            .any(|o| o.step() == f.step() && overlaps(o.bounds(), f.bounds()))
-}
-/// `HangingEntity.canCoexist(false)` for a painting.
-fn painting_coexists(p: &Painting, paintings: &[Painting], frames: &[ItemFrame]) -> bool {
-    !paintings
-        .iter()
-        .any(|o| o.id != p.id && overlaps(o.bounds(), p.bounds()))
-        && !frames
-            .iter()
-            .any(|o| o.step() == p.step() && overlaps(o.bounds(), p.bounds()))
-}
 
 /// `HangingEntityItem.mayPlace` for a painting: not a floor or ceiling.
 /// Direction.get2DDataValue: south 0, west 1, north 2, east 3.
@@ -121,7 +99,7 @@ fn faces_camera(corners: &[glam::DVec3; 4], normal: glam::DVec3) -> bool {
 
 impl Game<'_> {
     /// `HangingEntity.survives`: no block collision in the box, solid blocks
-    /// (or diodes) behind it and no conflicting hanging entity overlapping it.
+    /// (or diodes) behind it and no other painting overlapping it.
     pub(super) fn painting_survives(&self, p: &Painting) -> bool {
         let (lo, hi) = p.bounds();
         let bounds = Aabb::new(
@@ -152,7 +130,10 @@ impl Game<'_> {
                 }
             }
         }
-        painting_coexists(p, &self.paintings, &self.item_frames)
+        !self
+            .paintings
+            .iter()
+            .any(|o| o.id != p.id && overlaps(o.bounds(), (lo, hi)))
     }
     /// `HangingEntityItem.useOn` on a client level: SUCCESS once
     /// `Painting.create` finds a surviving variant (and the stack's
@@ -257,35 +238,9 @@ impl Game<'_> {
                 return true;
             }
         }
-        // `updateCustomEntityTag`: the item's `custom_data` and its `entity_data`
-        // merged over the painting, so a `variant` there replaces the pick (and
-        // has to survive, else the use is CONSUME).
-        let own = horizon_client::entity_nbt::painting_to_nbt(&candidate, [0; 4], None);
-        let mut raw = horizon_client::block_entity_item::stack_configured_entity(
-            stack,
-            "minecraft:painting",
-            &own,
-        );
-        if let Some((_, _, variant)) = horizon_client::entity_nbt::painting_from_nbt(&raw)
-            && *candidate.variant != *variant
-            && let Some(v) = self
-                .painting_variants
-                .get(&horizon_world::datafix::dynamic::namespaced(&variant))
-                .cloned()
-        {
-            (candidate.variant, candidate.width, candidate.height) = (v.id, v.width, v.height);
-            if !self.painting_survives(&candidate) {
-                self.award_stat("used", &stack.item, 1);
-                return true;
-            }
-        }
-        if let horizon_world::nbt::Tag::Compound(map) = &mut raw {
-            map.remove(&"UUID".into());
-        }
         if self.hanging_place_cancelled("minecraft:painting", pos) {
             return true;
         }
-        self.persist.raw.insert(candidate.id, raw);
         let (lo, hi) = candidate.bounds();
         let at = [
             (lo[0] + hi[0]) / 2.0,
@@ -350,8 +305,6 @@ impl Game<'_> {
             (lo[2] + hi[2]) / 2.0,
         ];
         self.world.modified.insert((p.pos[0] >> 4, p.pos[2] >> 4));
-        // BlockAttachedEntity.kill, before dropItem.
-        self.entity_killed_event(at, by_player);
         if !self.ui.rules.bool("entity_drops") {
             return true;
         }
@@ -554,41 +507,6 @@ impl Game<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hanging_entities_block_overlapping_other_types() {
-        let p = Painting {
-            id: 1,
-            pos: [0, 0, 0],
-            facing: 0,
-            variant: Arc::from("minecraft:kebab"),
-            width: 1,
-            height: 1,
-            check_interval: 0,
-        };
-        let mut f = ItemFrame {
-            id: 2,
-            pos: [0, 0, 0],
-            facing: 3,
-            glow: false,
-            item: None,
-            rotation: 0,
-            drop_chance: 1.0,
-            fixed: false,
-            invisible: false,
-            check_interval: 0,
-            custom_name: None,
-        };
-        for glow in [false, true] {
-            f.glow = glow;
-            assert!(!frame_coexists(&f, &[], std::slice::from_ref(&p)));
-            assert!(!painting_coexists(&p, &[], std::slice::from_ref(&f)));
-            f.pos = [2, 0, 0];
-            assert!(frame_coexists(&f, &[], std::slice::from_ref(&p)));
-            assert!(painting_coexists(&p, &[], std::slice::from_ref(&f)));
-            f.pos = [0, 0, 0];
-        }
-    }
 
     /// `HangingEntityItem.useOn` returns SUCCESS (the hand swings) when a
     /// painting is created on a wall. Floor, ceiling, or a failed create is

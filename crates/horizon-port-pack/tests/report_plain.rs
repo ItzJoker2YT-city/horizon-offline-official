@@ -29,7 +29,6 @@ fn row(class: &str, tier: &str, status: Status) -> Row {
         reason: String::new(),
         plain: String::new(),
         waiting: 0,
-        old_layout: false,
     }
 }
 

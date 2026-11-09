@@ -99,10 +99,7 @@ impl Viewer {
     /// Plays an emote once on the player model, its items following their bones. The emote
     /// format isn't in `horizon_cosmetics` yet: its player implements `BodyMotion` and calls
     /// this (docs/cosmetics.md, "The live view").
-    #[allow(
-        dead_code,
-        reason = "the emote player that calls this is not in horizon_cosmetics yet"
-    )]
+    #[allow(dead_code)]
     pub(super) fn play(&mut self, motion: Arc<dyn BodyMotion>, cx: &mut Context<Self>) {
         self.stage.play(motion, Instant::now());
         cx.notify();

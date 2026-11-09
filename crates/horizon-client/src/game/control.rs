@@ -53,7 +53,6 @@ const HELP: &[&str] = &[
     "fill X1 Y1 Z1 X2 Y2 Z2 BLOCK   set a box of loaded blocks",
     "resume                         leave the pause menu",
     "screenshot PATH                write the next frame as PNG",
-    "screenshot-sequence FRAMES STEP_MS PATH|cancel  a shader pack's first frames on a set clock (HORIZON_STILL), the last as PNG",
     "chat TEXT                      send a chat line or /command as if typed",
     "type TEXT                      type into the open chat box (key enter tap sends)",
     "chat-log [N]                   the newest N chat messages (default 10)",
@@ -242,7 +241,7 @@ impl Game<'_> {
                     self.world_options_text(None);
                     return Ok(());
                 }
-                Screen::Inventory | Screen::Creative if self.mod_browser_typing() => {
+                Screen::Inventory if self.mod_browser_typing() => {
                     self.mod_browser_text(None, true);
                     return Ok(());
                 }
@@ -261,21 +260,6 @@ impl Game<'_> {
     /// Nothing here is a key — the caller drops control characters. `Err` when
     /// no text box of the screen takes them.
     pub(super) fn type_chars_into_screen(&mut self, text: &str) -> Result<()> {
-        // Overlays own the input even when a text box remains focused behind them.
-        if self.dialog_open() {
-            self.dialog_type(text);
-            return Ok(());
-        }
-        if self.prompt_open() {
-            return Ok(());
-        }
-        if let Some(result) = self.type_text_field_input(text) {
-            return result;
-        }
-        self.type_chars_unhooked(text)
-    }
-
-    pub(super) fn type_chars_unhooked(&mut self, text: &str) -> Result<()> {
         if self.book.is_some() {
             self.book_type(text);
             return Ok(());
@@ -301,7 +285,7 @@ impl Game<'_> {
             Screen::Options => self.ui.options.type_text(&self.gui.atlas, text),
             // The port, or the game rules' search and number boxes.
             Screen::WorldOptions => self.world_options_text(Some(text)),
-            Screen::Inventory | Screen::Creative if self.mod_browser_typing() => {
+            Screen::Inventory if self.mod_browser_typing() => {
                 self.mod_browser_text(Some(text), false)
             }
             Screen::Inventory if self.recipe_search_focused() => {
@@ -310,11 +294,6 @@ impl Game<'_> {
             // The anvil's rename box, while it has an input to name.
             Screen::Inventory if self.station_typing() => self.station_text(Some(text), false),
             Screen::Creative if self.creative_screen.tab().search => {
-                // CreativeModeInventoryScreen.charTyped: the chat key that
-                // opened the tab does not type its letter.
-                if std::mem::take(&mut self.creative_ignore_text) {
-                    return Ok(());
-                }
                 // As typed: replaces a selected query, keeps the length limit.
                 self.creative_search_edit(Some(text))
             }
@@ -360,10 +339,6 @@ impl Game<'_> {
         event_loop: &dyn EventLoopCtl,
     ) -> Result<Option<Value>> {
         let words: Vec<&str> = line.split_whitespace().collect();
-        self.screenshot_sequence_gate(words.first().copied())?;
-        if words.first() == Some(&"screenshot-sequence") {
-            return self.screenshot_sequence_command(line, reply);
-        }
         if self.pending_save.is_some() && words.first() != Some(&"quit") {
             return Err("a world save is in progress".into());
         }
@@ -607,9 +582,6 @@ impl Game<'_> {
                         "key action must be down, up, tap or repeat, not {action}"
                     )
                     .into());
-                }
-                if arg(2)? != "up" {
-                    self.pad.keyboard_took_over = true;
                 }
                 // The command confirmation takes the keys; none go past it.
                 if self.command_prompt.is_some() {
@@ -1038,12 +1010,6 @@ impl Game<'_> {
                 // key event fires it. A cancelled character is dropped, so
                 // `type` types the survivors only.
                 // `\b` is the socket's backspace sentinel, not two characters.
-                if text != "\\b"
-                    && let Some(result) = self.type_text_field_input(text)
-                {
-                    result?;
-                    return ok();
-                }
                 let typed = if text == "\\b" {
                     text.to_owned()
                 } else {
@@ -1093,7 +1059,6 @@ impl Game<'_> {
                 if page == Page::ShaderPacks {
                     self.settings.shader_packs =
                         horizon_client::shader_pack_list::scan(&Self::shader_packs_dir());
-                    self.open_shader_options();
                 }
                 ok()
             }

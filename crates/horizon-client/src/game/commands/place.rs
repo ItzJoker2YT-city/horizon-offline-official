@@ -30,30 +30,26 @@ impl Game<'_> {
             })
             .as_ref()
     }
-    /// A template's tree by id, as `StructureTemplateManager` reads it: the
-    /// world's saved structures, the enabled data packs from the highest, and
-    /// the game's own.
+    /// A template's tree by id, as `StructureTemplateManager` reads it from
+    /// disk.
     pub(in crate::game) fn read_template_tag(&self, id: &str) -> Option<Tag> {
         let (ns, path) = id.split_once(':').unwrap_or(("minecraft", id));
-        let generated = self
-            .world_root
-            .join("generated")
-            .join(ns)
-            .join("structures")
-            .join(format!("{path}.nbt"));
-        let in_pack = format!("data/{ns}/structure/{path}.nbt");
-        let prepared = self
-            .options
-            .resources
-            .join("worldgen/structure")
-            .join(ns)
-            .join(format!("{path}.nbt"));
         let candidates = [
-            std::fs::read(&generated).ok(),
-            self.fns.pack_file(&in_pack),
-            std::fs::read(&prepared).ok(),
+            self.world_root
+                .join("generated")
+                .join(ns)
+                .join("structures")
+                .join(format!("{path}.nbt")),
+            self.options
+                .resources
+                .join("worldgen/structure")
+                .join(ns)
+                .join(format!("{path}.nbt")),
         ];
-        for bytes in candidates.into_iter().flatten() {
+        for file in candidates {
+            let Ok(bytes) = std::fs::read(&file) else {
+                continue;
+            };
             let Ok(raw) = Compression::Gzip.decode(&bytes, 1 << 28) else {
                 continue;
             };

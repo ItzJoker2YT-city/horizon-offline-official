@@ -92,7 +92,6 @@ def generate(command, build):
             wait_new(server, start, ack)
     finally:
         server.stop()
-    (directory / 'finished').touch()
     return directory / 'world'
 
 
@@ -415,8 +414,7 @@ def main():
     net.PROPERTIES['force-gamemode'] = 'false'
     _, build, java, native, client = net.sides(args.build_name, args.binary.resolve() if args.binary else None)
     world = build / 'generate/world'
-    # A generate step that died leaves a world that must not be reused.
-    if not (build / 'generate/finished').exists():
+    if not world.exists():
         world = generate(java, build)
     reference = json.loads(args.reference.read_text()) if args.reference else None
     for side in (['java', 'native'] if args.side == 'both' else [args.side]):

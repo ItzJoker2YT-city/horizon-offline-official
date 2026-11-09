@@ -224,8 +224,6 @@ fn replay(window: Arc<Window>) -> Result<(), Box<dyn std::error::Error>> {
         settings.translucent_batching,
         false,
         false,
-        false,
-        false,
     ))?;
     drop(pixels);
     render.pixels.pack();

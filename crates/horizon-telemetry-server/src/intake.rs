@@ -205,7 +205,7 @@ type Received = (i64, Option<String>, Map<String, Value>);
 
 /// Checks a report and queues it.
 async fn receive(
-    app: &Arc<App>,
+    app: &App,
     req: Request,
     kind: &str,
     rules: &[Field],
@@ -225,22 +225,12 @@ async fn receive(
     }
     let entry = fields(&body, rules).map_err(|e| no(StatusCode::BAD_REQUEST, &e))?;
     let today = (app.today)();
-    // The day's count and the queueing, on the blocking pool (crate::blocking), under one lock.
-    let (kind_owned, queued) = (kind.to_owned(), entry.clone());
-    let stored = crate::blocking(app, move |app| {
-        let mut store = app.store();
-        if store.queued_on(&kind_owned, today).unwrap_or(u32::MAX) >= per_day {
-            return None;
-        }
-        Some(store.enqueue(&kind_owned, today, today.saturating_sub(1), &queued))
-    })
-    .await
-    .map_err(|_| no(StatusCode::SERVICE_UNAVAILABLE, "try again later"))?;
-    let Some(stored) = stored else {
+    let mut store = app.store();
+    if store.queued_on(kind, today).unwrap_or(u32::MAX) >= per_day {
         let full = "too many today: please try again tomorrow";
         return Err(no(StatusCode::SERVICE_UNAVAILABLE, full));
-    };
-    match stored {
+    }
+    match store.enqueue(kind, today, today.saturating_sub(1), &entry) {
         Ok((id, issue)) => Ok((id, issue, entry)),
         Err(e) => {
             eprintln!("horizon-telemetry-server: could not queue a {kind}: {e}");
@@ -278,9 +268,7 @@ pub async fn report(State(app): State<Arc<App>>, req: Request) -> Response {
         .and_then(|opened| opened);
     match opened {
         Ok(url) => {
-            let marked = url.clone();
-            // A failure here only logs (mark_filed): the issue is open either way.
-            let _ = crate::blocking(&app, move |app| app.mark_filed(id, &marked)).await;
+            app.mark_filed(id, &url);
             answer(&app, StatusCode::CREATED, json!({ "id": id, "issue": url }))
         }
         Err(e) => {

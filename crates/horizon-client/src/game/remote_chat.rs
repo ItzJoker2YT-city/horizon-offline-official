@@ -432,9 +432,7 @@ impl Game<'_> {
                 }
             }
             // Gui.openChatAndAddText.
-            (true, CommandAccept::Suggest, _) => {
-                self.open_chat(&format!("/{}", prompt.command), false)
-            }
+            (true, CommandAccept::Suggest, _) => self.open_chat(&format!("/{}", prompt.command)),
             (true, CommandAccept::Copy, _) => {
                 use horizon_client::clipboard::Clipboard;
                 self.clipboard.set(&format!("/{}", prompt.command));

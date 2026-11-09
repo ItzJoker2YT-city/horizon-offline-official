@@ -66,8 +66,6 @@ fn fixture(window: Arc<Window>) -> Result<(), Box<dyn std::error::Error>> {
         false,
         false,
         true,
-        false,
-        false,
     ))?;
     assert!(!renderer.pack_entity_shadows(), "no selected pack");
     renderer.set_shader_pack(0, None, &[]).unwrap();

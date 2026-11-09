@@ -1,6 +1,7 @@
 use super::*;
 use horizon_client::voxel_occlusion::Culler;
 
+#[allow(dead_code)]
 fn vertex(pos: [f32; 3]) -> Vertex {
     Vertex {
         pos,

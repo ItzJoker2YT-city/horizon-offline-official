@@ -194,8 +194,10 @@ impl StructureAdaptation {
                 continue;
             }
             let rigid = pool.element.projection() == Projection::Rigid;
-            if rigid && let Some(b) = adaptation.piece_box(b, pool.rotation) {
-                push_piece(pieces, adaptation, b, &mut include);
+            if rigid {
+                if let Some(b) = adaptation.piece_box(b, pool.rotation) {
+                    push_piece(pieces, adaptation, b, &mut include);
+                }
             }
             if (rigid && !self.rigid_junctions) || adaptation.band.is_some() {
                 continue;
