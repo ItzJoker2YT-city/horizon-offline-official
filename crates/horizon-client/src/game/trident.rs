@@ -31,7 +31,7 @@ pub(super) struct ThrownTrident {
     pub(super) yaw: f32,
     pub(super) pitch: f32,
     pub(super) in_ground: bool,
-    in_ground_time: u32,
+    pub(super) in_ground_time: u32,
     /// `AbstractArrow.shakeTime`: seven ticks after sticking, no pickup.
     shake: u32,
     dealt_damage: bool,
@@ -47,6 +47,8 @@ pub(super) struct ThrownTrident {
     was_touching_water: bool,
     /// `Entity.random`, used for the extinguishing sound and a breeze's turn.
     random: horizon_core::random::LegacyRandom,
+    /// `AbstractArrow.lastState`: the block it stuck in; not saved.
+    last_state: Option<horizon_world::registry::BlockStateId>,
     /// `Projectile.lastDeflectedBy`: the breeze that already turned this trident.
     deflected_by: Option<u32>,
     /// `Entity.tickCount`: `ProjectileUtil.computeMargin` grows with it.
@@ -136,7 +138,24 @@ impl ThrownTrident {
             owner: 0,
             guest: None,
             deflected_by: None,
+            last_state: None,
         }
+    }
+    /// `AbstractArrow.shouldFall`: stuck, and nothing solid within 0.06 of it.
+    fn should_fall(&self, scene: &horizon_client::arrows::ArrowScene<'_, '_>) -> bool {
+        let at = self.position;
+        self.in_ground
+            && scene.no_block_collision(Aabb::new(at, at).inflate(Vec3::new(0.06, 0.06, 0.06)))
+    }
+    /// `AbstractArrow.startFalling`: unstick, scaling the velocity by three
+    /// draws of `nextFloat() * 0.2F` in x, y, z order.
+    fn start_falling(&mut self) {
+        self.in_ground = false;
+        let v = self.velocity;
+        let x = f64::from(self.random.next_float() * 0.2);
+        let y = f64::from(self.random.next_float() * 0.2);
+        let z = f64::from(self.random.next_float() * 0.2);
+        self.velocity = Vec3::new(v.x * x, v.y * y, v.z * z);
     }
     /// `ThrownTrident.tick`'s Loyalty return: pulled up and towards the
     /// owner's eye.
@@ -267,7 +286,7 @@ impl Game<'_> {
         self.start_using_item();
         true
     }
-    fn in_water_or_rain(&mut self) -> bool {
+    pub(in crate::game) fn in_water_or_rain(&mut self) -> bool {
         let Some(p) = &self.player else { return false };
         let (x, y, z) = (
             p.position.x.floor() as i32,
@@ -480,6 +499,7 @@ impl Game<'_> {
             owner: 0,
             guest: self.lan_acting,
             deflected_by: None,
+            last_state: None,
         });
         self.player_projectile_shot();
         self.audio.play_bound(
@@ -490,6 +510,24 @@ impl Game<'_> {
             horizon_client::sound_engine::SoundEntity::new(id, [start.x, start.y, start.z], false),
             None,
         );
+    }
+    /// `settle_dealt_absorbed` for the player who threw a trident: a LAN guest's own
+    /// statistics are only reachable inside `as_guest`, so the host is not credited.
+    fn thrower_dealt_absorbed(&mut self, guest: Option<u32>) {
+        let Some(conn) = guest.filter(|c| self.lan_acting != Some(*c)) else {
+            self.settle_dealt_absorbed(true);
+            return;
+        };
+        let Some(mut host) = self.lan.take() else {
+            // No host to enter: still drain the mobs so nothing leaks to a later hit.
+            self.settle_dealt_absorbed(false);
+            return;
+        };
+        let entered = self.as_guest(&mut host, conn, |g| g.settle_dealt_absorbed(true));
+        self.lan = Some(host);
+        if entered.is_none() {
+            self.settle_dealt_absorbed(false);
+        }
     }
     /// The thrower's `PLAYER_HURT_ENTITY` for a trident hit: run as the
     /// guest that threw it, and not at all once they have left.
@@ -698,6 +736,17 @@ impl Game<'_> {
             }
             let stuck_tick = t.in_ground && !t.no_physics;
             if t.in_ground {
+                // AbstractArrow.tick: `if (lastState != blockState && shouldFall())
+                // startFalling();` (`blockState` is the block at its position).
+                // Its `else tickDespawn()` has no counterpart here: no `life`.
+                if !t.no_physics {
+                    let rain = self.arrow_rain();
+                    let scene = self.arrow_scene(&rain);
+                    let state = scene.block(BlockPos::containing(t.position));
+                    if t.last_state != Some(state) && t.should_fall(&scene) {
+                        t.start_falling();
+                    }
+                }
                 t.in_ground_time += 1;
                 if !t.no_physics {
                     let at = t.position;
@@ -858,6 +907,7 @@ impl Game<'_> {
                                 hurt_at = Some([m.position.x, m.position.y, m.position.z]);
                             }
                         }
+                        self.thrower_dealt_absorbed(t.guest);
                         // ThrownTrident.onHitEntity on a boat or minecart:
                         // VehicleEntity.hurtServer takes the damage.
                         let creative = t.guest.is_none() && self.creative;
@@ -955,6 +1005,7 @@ impl Game<'_> {
                         t.position = stop;
                         t.velocity = Vec3::ZERO;
                         t.in_ground = true;
+                        t.last_state = Some(self.world.block(block.x, block.y, block.z));
                         t.shake = 7;
                         self.audio.play(
                             "minecraft:item.trident.hit_ground",
@@ -1146,8 +1197,23 @@ horizon_client::impl_joined!(ThrownTrident);
 
 #[cfg(test)]
 mod tests {
-    use super::breeze_deflect;
+    use super::{ThrownTrident, breeze_deflect};
     use horizon_core::geometry::Vec3;
+
+    /// `AbstractArrow.startFalling` on `new Random(42)`: its first three
+    /// `nextFloat() * 0.2F` draws (computed from Java's LCG) scale x, y, z.
+    #[test]
+    fn a_falling_trident_scales_its_velocity_by_three_draws() {
+        let mut t = ThrownTrident::remote(42, Vec3::ZERO, 0.0, 0.0);
+        t.in_ground = true;
+        t.velocity = Vec3::new(1.0, 1.0, 1.0);
+        t.start_falling();
+        assert!(!t.in_ground);
+        assert_eq!(
+            t.velocity,
+            Vec3::new(0.14551274478435516, 0.0109330415725708, 0.13664469122886658)
+        );
+    }
 
     /// `ProjectileDeflection.REVERSE` at power 1: half speed, the other way,
     /// and a turn of 170 degrees plus a fifth of the random draw.

@@ -79,3 +79,30 @@ pub(super) fn sign_in_button(id: &'static str, t: &Theme) -> Stateful<Div> {
                 .child(tr("Sign in with Microsoft").to_string()),
         )
 }
+
+/// How long the logout page gets before the code page opens after it.
+const LOGOUT_WAIT: Duration = Duration::from_millis(2500);
+
+// OFFLINE: the offline flavor has no private-window module; the code page always opens
+// in the player's normal browser.
+pub(super) fn has_private_window() -> bool {
+    false
+}
+
+/// Opens the code page in the default browser's private window, where no Microsoft account is
+/// signed in; in the normal window if the browser can't be started.
+pub(super) fn open_private(uri: &str, cx: &mut App) {
+    cx.open_url(uri);
+}
+
+/// "Use a different Microsoft account": Microsoft's logout page first, then the code page, in
+/// the player's normal browser.
+pub(super) fn use_different_account(uri: &str, cx: &mut App) {
+    cx.open_url("https://login.live.com/logout.srf");
+    let uri = uri.to_owned();
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(LOGOUT_WAIT).await;
+        cx.update(|cx| cx.open_url(&uri));
+    })
+    .detach();
+}
